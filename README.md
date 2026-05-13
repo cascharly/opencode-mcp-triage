@@ -6,7 +6,7 @@ On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by 
 
 - **Save tokens** — MCP tools have large descriptions. Keeping them disabled in the main session saves ~80% of MCP-related token usage
 - **No LLM overhead** — routing uses pure keyword matching, not embeddings or LLM calls
-- **Zero config after install** — automatically disables MCP tools on first run, no manual setup
+- **Zero config after install** — automatically disables MCP tools AND creates subagents on first run, no manual setup needed
 - **Smart routing** — weighted scoring across agent names, descriptions, and server names with confidence thresholds
 - **Hot reload** — refresh MCP config without restarting OpenCode (`triage_mcp query: "reload"`)
 
@@ -14,9 +14,10 @@ On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by 
 
 1. **Plugin init** reads all MCP servers and subagents from `opencode.jsonc` config
 2. **Disables** all MCP tools globally (`"servername_*": false`) so they don't consume tokens in the main agent
-3. **Subagents** re-enable specific servers via tool scoping (`"servername_*": true`)
-4. **`triage_mcp` tool** scores user queries against subagent names, descriptions, and MCP server names using pure keyword matching (no LLM overhead)
-5. **Routes** to the best-matching subagent or shows options when unsure
+3. **Auto-creates** one subagent per MCP server that has no existing subagent — novice-friendly, no manual config needed
+4. **Subagents** re-enable specific servers via tool scoping (`"servername_*": true`)
+5. **`triage_mcp` tool** scores user queries against subagent names, descriptions, and MCP server names using pure keyword matching (no LLM overhead)
+6. **Routes** to the best-matching subagent or shows options when unsure
 
 The scoring engine uses word-boundary matching with weighted passes:
 - Subagent name matches: weight ×3
@@ -158,11 +159,39 @@ On first run, the plugin writes disable entries to your project config:
 
 This disables MCP tools in the main session. Subagents re-enable them.
 
+### Auto-created subagents (auto-generated)
+
+On first run (and on `triage_mcp query: "reload"`), the plugin creates one subagent per MCP server that doesn't already have one:
+
+```jsonc
+{
+  "agent": {
+    "github": {
+      "description": "GitHub issue/PR management",
+      "mode": "subagent",
+      "tools": {
+        "github_*": true
+      }
+    }
+  }
+}
+```
+
+The subagent name matches the MCP server name, and its description comes from the server's `description` field (or falls back to `"<name> operations"`).
+
+**Behavior:**
+- Already-covered MCP servers are skipped — existing user-defined subagents are never touched
+- Deleting an auto-created subagent is respected — it won't be re-created on next reload (tracked via `.opencode/mcp-triage.json`)
+- Adding a new MCP server later auto-creates its subagent on reload
+- Power users can delete auto-created entries and define their own grouped subagents
+
 ## Uninstall
 
 1. Remove `opencode-mcp-triage` from the `plugin` array in your `opencode.jsonc`
 2. Remove the auto-generated `"servername_*": false` entries from the `"tools"` block to restore full MCP tool access
-3. Remove the slash command:
+3. (Optional) Remove any auto-created subagents from the `"agent"` block
+4. (Optional) Delete the lock file at `.opencode/mcp-triage.json`
+5. Remove the slash command:
 
 ```bash
 rm ~/.config/opencode/commands/mcp-triage.md

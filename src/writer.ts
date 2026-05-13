@@ -22,6 +22,8 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises"
 import { join, dirname } from "node:path"
 import { homedir } from "node:os"
+import { readLock, writeLock } from "./lock.js"
+import type { McpServer, Subagent } from "./types.js"
 
 /**
  * Ensures all MCP server tools are disabled in the main agent's tools config.
@@ -134,6 +136,139 @@ export async function ensureToolsDisabled(
 }
 
 /**
+ * Ensures auto-created subagents exist for all unassigned MCP servers.
+ *
+ * An MCP server is "unassigned" when no existing subagent covers it AND
+ * it hasn't been previously auto-created and removed by the user (tracked
+ * via the lock file).
+ *
+ * Creates one subagent per MCP server with:
+ * - name = MCP server name
+ * - description = server description, or "<name> operations" fallback
+ * - mode = "subagent"
+ * - tools = { "name_*": true }
+ *
+ * @returns number of subagents created
+ */
+export async function ensureSubagentsCreated(
+  directory: string,
+  mcpServers: McpServer[],
+  existingSubagents: Subagent[]
+): Promise<number> {
+  if (mcpServers.length === 0) return 0
+
+  // Find which MCPs are already covered by existing subagents
+  const covered = new Set<string>()
+  for (const sa of existingSubagents) {
+    for (const m of sa.mcpServers) {
+      covered.add(m)
+    }
+  }
+
+  // Read lock file — MCPs in autoCreated were previously created
+  // If user deleted them, they stay in the lock file and we respect that
+  const lock = await readLock(directory)
+  const previouslyCreated = new Set(
+    lock ? Object.keys(lock.autoCreated) : []
+  )
+
+  // MCPs that need subagents: not covered AND not previously declined
+  const toCreate = mcpServers.filter(
+    (m) => !covered.has(m.name) && !previouslyCreated.has(m.name)
+  )
+
+  if (toCreate.length === 0) return 0
+
+  const resolved = await findProjectConfigPath(directory)
+  if (!resolved) return 0
+
+  let raw: string
+  try {
+    raw = await readFile(resolved.path, "utf-8")
+  } catch {
+    raw = "{}"
+  }
+
+  // Build subagent entries as JSON text
+  const entries = toCreate.map((mcp) => {
+    const desc = mcp.description
+      ? jsonEscape(mcp.description)
+      : `${mcp.name} operations`
+    return `"${mcp.name}": {\n      "description": "${desc}",\n      "mode": "subagent",\n      "tools": {\n        "${mcp.name}_*": true\n      }\n    }`
+  })
+
+  const entriesText = entries.join(",\n    ")
+
+  const stripped = stripJsonComments(raw)
+  const agentMatch = stripped.match(/"agent"\s*:\s*\{/)
+
+  let modified: string
+
+  if (agentMatch) {
+    const insertPos = mapStrippedPosition(
+      raw, stripped,
+      agentMatch.index! + agentMatch[0].length
+    )
+    const prefix = raw.slice(0, insertPos)
+    const suffix = raw.slice(insertPos)
+
+    const suffixStripped = stripJsonComments(suffix)
+    const emptyBlockMatch = suffixStripped.match(/^\s*\}/)
+    if (emptyBlockMatch) {
+      const emptyEndPos = mapStrippedPosition(
+        raw, suffix,
+        suffixStripped.indexOf("}") + 1
+      )
+      modified = prefix + "\n    " + entriesText + "\n  " +
+        raw.slice(insertPos + emptyEndPos)
+    } else {
+      modified =
+        prefix + "\n    " + entriesText + ",\n    " + suffix.trimStart()
+    }
+  } else {
+    const agentBlock =
+      `"agent": {\n    ${entriesText}\n  }`
+
+    const strippedForBrace = stripJsonComments(raw)
+    const closingBrace = findClosingRootBrace(strippedForBrace)
+
+    if (closingBrace >= 0) {
+      const lastBrace = raw.lastIndexOf("}")
+      const beforeRaw = raw.slice(0, lastBrace).trimEnd()
+      const afterRaw = raw.slice(lastBrace)
+      const prefix = beforeRaw === "{" ? "" : ","
+      modified = beforeRaw + prefix + "\n  " + agentBlock + "\n" + afterRaw
+    } else {
+      modified = raw.trimEnd() + ",\n  " + agentBlock + "\n}"
+    }
+  }
+
+  // Safety check
+  try {
+    JSON.parse(stripJsonComments(modified))
+  } catch {
+    throw new Error("Generated invalid JSONC when creating subagent entries")
+  }
+
+  await mkdir(dirname(resolved.path), { recursive: true })
+  await writeFile(resolved.path, modified, "utf-8")
+
+  // Update lock file
+  const newAutoCreated: Record<string, string> = {
+    ...(lock?.autoCreated ?? {}),
+  }
+  for (const m of toCreate) {
+    newAutoCreated[m.name] = m.name
+  }
+  await writeLock(directory, {
+    version: 1,
+    autoCreated: newAutoCreated,
+  })
+
+  return toCreate.length
+}
+
+/**
  * Finds the project-level opencode config file path.
  *
  * Search order (first match wins):
@@ -228,6 +363,15 @@ function stripJsonComments(raw: string): string {
   let result = raw.replace(/\/\*[\s\S]*?\*\//g, "")
   result = result.replace(/(?<!:)\/\/.*$/gm, "")
   return result
+}
+
+function jsonEscape(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
 }
 
 /**

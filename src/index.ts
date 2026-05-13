@@ -28,7 +28,7 @@ import { tool } from "@opencode-ai/plugin"
 import type { McpServer, Subagent } from "./types.js"
 import { readMcpConfig, readSubagentConfig } from "./config.js"
 import { scoreSubagents, THRESHOLD } from "./triage.js"
-import { ensureToolsDisabled } from "./writer.js"
+import { ensureToolsDisabled, ensureSubagentsCreated } from "./writer.js"
 
 /**
  * Mutable plugin state — updated on init and reload.
@@ -79,12 +79,20 @@ function buildState(mcpServers: McpServer[], subagents: Subagent[]): State {
  */
 export const server: Plugin = async ({ directory }) => {
   const mcpServers = await readMcpConfig(directory)
-  const subagents = await readSubagentConfig(directory)
+  const mcpNames = mcpServers.map((s) => s.name)
 
-  // One-time setup: disable all MCP tools in main agent
-  // This MUST complete before plugin returns — otherwise main session
+  // Phase 1: disable all MCP tools in main agent
+  // This MUST complete before returning — otherwise main session
   // could use MCP tools before they're disabled
-  await ensureToolsDisabled(directory, mcpServers.map((s) => s.name))
+  await ensureToolsDisabled(directory, mcpNames)
+
+  // Phase 2: read current subagents, then auto-create for unassigned MCPs
+  let subagents = await readSubagentConfig(directory)
+  const created = await ensureSubagentsCreated(directory, mcpServers, subagents)
+  if (created > 0) {
+    // Re-read after auto-create so state is accurate
+    subagents = await readSubagentConfig(directory)
+  }
 
   const state = buildState(mcpServers, subagents)
 
@@ -123,10 +131,22 @@ export const server: Plugin = async ({ directory }) => {
           // "reload" — re-read config files without restarting
           if (query.toLowerCase() === "reload") {
             state.mcpServers = await readMcpConfig(directory)
-            state.subagents = await readSubagentConfig(directory)
+            let sa = await readSubagentConfig(directory)
+            const created = await ensureSubagentsCreated(
+              directory,
+              state.mcpServers,
+              sa
+            )
+            if (created > 0) {
+              sa = await readSubagentConfig(directory)
+            }
+            state.subagents = sa
             const fresh = buildState(state.mcpServers, state.subagents)
             Object.assign(state, fresh)
             const lines = ["MCP config reloaded."]
+            if (created > 0) {
+              lines.push(`Auto-created ${created} subagent(s) for new MCP(s).`)
+            }
             lines.push(
               `Subagents: ${state.subagents.map((s) => s.name).join(", ") || "none"}`
             )
