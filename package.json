@@ -3,7 +3,7 @@
   "version": "0.5.0",
   "description": "On-demand MCP tool activation for OpenCode — saves ~80% tokens by shrinking MCP tool descriptions and routing via keyword matching",
   "license": "MIT",
-  "author": "OpenCode Community",
+  "author": "Carlos Spagnoletti",
   "keywords": [
     "opencode",
     "opencode-plugin",
