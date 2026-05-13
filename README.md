@@ -10,6 +10,21 @@ On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by 
 - **Smart routing** — weighted scoring across agent names, descriptions, and server names with confidence thresholds
 - **Hot reload** — refresh MCP config without restarting OpenCode (`triage_mcp query: "reload"`)
 
+## How It Works
+
+1. **Plugin init** reads all MCP servers and subagents from `opencode.jsonc` config
+2. **Disables** all MCP tools globally (`"servername_*": false`) so they don't consume tokens in the main agent
+3. **Subagents** re-enable specific servers via tool scoping (`"servername_*": true`)
+4. **`triage_mcp` tool** scores user queries against subagent names, descriptions, and MCP server names using pure keyword matching (no LLM overhead)
+5. **Routes** to the best-matching subagent or shows options when unsure
+
+The scoring engine uses word-boundary matching with weighted passes:
+- Subagent name matches: weight ×3
+- MCP server name matches: weight ×3
+- Description matches: weight ×1
+
+If the top score exceeds the runner-up by ≥30 points, it auto-routes. Otherwise it shows the top 5 options for you to choose.
+
 ## Installation
 
 ### Local development
@@ -47,21 +62,6 @@ Add to `.opencode/opencode.jsonc` or project-root `opencode.jsonc`:
   "plugin": ["file:/path/to/opencode-mcp-triage"]
 }
 ```
-
-## How It Works
-
-1. **Plugin init** reads all MCP servers and subagents from `opencode.jsonc` config
-2. **Disables** all MCP tools globally (`"servername_*": false`) so they don't consume tokens in the main agent
-3. **Subagents** re-enable specific servers via tool scoping (`"servername_*": true`)
-4. **`triage_mcp` tool** scores user queries against subagent names, descriptions, and MCP server names using pure keyword matching (no LLM overhead)
-5. **Routes** to the best-matching subagent or shows options when unsure
-
-The scoring engine uses word-boundary matching with weighted passes:
-- Subagent name matches: weight ×3
-- MCP server name matches: weight ×3
-- Description matches: weight ×1
-
-If the top score exceeds the runner-up by ≥30 points, it auto-routes. Otherwise it shows the top 5 options for you to choose.
 
 ## Commands
 
