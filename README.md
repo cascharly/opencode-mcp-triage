@@ -70,24 +70,6 @@ Add to `.opencode/opencode.jsonc` or project-root `opencode.jsonc`:
 }
 ```
 
-### npm
-
-```bash
-npm install -g opencode-mcp-triage
-```
-
-### yarn
-
-```bash
-yarn global add opencode-mcp-triage
-```
-
-### pnpm
-
-```bash
-pnpm add -g opencode-mcp-triage
-```
-
 ### Local development
 
 ```bash
@@ -175,24 +157,6 @@ This disables MCP tools in the main session. Subagents re-enable them.
 ### Remove the plugin
 
 Delete `opencode-mcp-triage` from the `plugin` array in your `opencode.jsonc`.
-
-### npm
-
-```bash
-npm uninstall -g opencode-mcp-triage
-```
-
-### yarn
-
-```bash
-yarn global remove opencode-mcp-triage
-```
-
-### pnpm
-
-```bash
-pnpm remove -g opencode-mcp-triage
-```
 
 ### Clean up tool disables
 
