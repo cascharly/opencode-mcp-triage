@@ -2,6 +2,18 @@
 
 On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by keeping MCP tools disabled in the main session and routing them to scoped subagents only when needed.
 
+## How the Triage Engine Works
+
+The scoring engine is pure text matching — no LLM calls, no vector embeddings:
+
+1. Split user query into words (min 3 chars, stripped of punctuation)
+2. For each subagent, score across three dimensions:
+   - **Name match** (×3): subagent name matches query words at word boundaries
+   - **Description match** (×1): description text matches query words
+   - **MCP server match** (×3): assigned MCP server names match query words
+3. If the top score exceeds the runner-up by ≥30 points, auto-route
+4. Otherwise show top 5 options for the user to choose
+
 ## How It Works
 
 1. **Plugin init** reads all MCP servers and subagents from `opencode.jsonc` config
@@ -191,18 +203,6 @@ Remove the auto-generated `"servername_*": false` entries from the `"tools"` blo
 ```bash
 rm ~/.config/opencode/commands/mcp-triage.md
 ```
-
-## How the Triage Engine Works
-
-The scoring engine is pure text matching — no LLM calls, no vector embeddings:
-
-1. Split user query into words (min 3 chars, stripped of punctuation)
-2. For each subagent, score across three dimensions:
-   - **Name match** (×3): subagent name matches query words at word boundaries
-   - **Description match** (×1): description text matches query words
-   - **MCP server match** (×3): assigned MCP server names match query words
-3. If the top score exceeds the runner-up by ≥30 points, auto-route
-4. Otherwise show top 5 options for the user to choose
 
 ## Token Savings
 
