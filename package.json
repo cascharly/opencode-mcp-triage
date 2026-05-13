@@ -1,0 +1,57 @@
+{
+  "name": "opencode-mcp-triage",
+  "version": "0.5.0",
+  "description": "On-demand MCP tool activation for OpenCode — saves ~80% tokens by shrinking MCP tool descriptions and routing via keyword matching",
+  "license": "MIT",
+  "author": "OpenCode Community",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "mcp",
+    "triage",
+    "router",
+    "token-optimization",
+    "ai-coding-agent"
+  ],
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "opencode-mcp-triage": "./bin/opencode-mcp-triage.cjs"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    ".opencode/commands/",
+    ".opencode/plugins/",
+    "postinstall.cjs",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "prepublishOnly": "npm run check",
+    "postinstall": "node postinstall.cjs"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.14.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": false
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cascharly/opencode-mcp-triage"
+  },
+  "devDependencies": {
+    "@types/node": ">=22",
+    "typescript": "^5.7",
+    "@opencode-ai/plugin": ">=1.14.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,305 @@
+/*
+ * opencode-mcp-triage — Subagent Router Plugin
+ * ==============================================
+ * Version: 0.5.0
+ * License: MIT
+ *
+ * Routes MCP work to scoped subagents. On first run, automatically
+ * disables all MCP tools globally in opencode.jsonc so they don't
+ * consume tokens in the main agent. Subagents re-enable specific
+ * servers via tool scoping.
+ *
+ * How it works:
+ * 1. Plugin init: reads MCP servers + subagents from config
+ * 2. Writes "servername_*": false to project config (disables MCP tools in main session)
+ * 3. Exposes triage_mcp tool: scores user query against subagent names/descriptions/MCP names
+ * 4. Returns best-matching subagent — user invokes it via @name or Task tool
+ *
+ * Token savings: MCP tools have large descriptions. Disabling them in the
+ * main session saves ~80% of MCP-related tokens. Subagents only carry
+ * their scoped servers' tools.
+ *
+ * Install:  { "plugin": ["opencode-mcp-triage"] }  in opencode.jsonc
+ * Docs:     https://github.com/cascharly/opencode-mcp-triage
+ */
+
+import type { Plugin } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin"
+import type { McpServer, Subagent } from "./types.js"
+import { readMcpConfig, readSubagentConfig } from "./config.js"
+import { scoreSubagents, THRESHOLD } from "./triage.js"
+import { ensureToolsDisabled } from "./writer.js"
+
+/**
+ * Mutable plugin state — updated on init and reload.
+ *
+ * mcpServers: all MCP servers from config (name + description)
+ * subagents: agents with MCP tool scoping
+ * mcpNames: flat list of MCP server names (for display)
+ * assignedMcps: set of MCP names that have at least one subagent
+ */
+interface State {
+  mcpServers: McpServer[]
+  subagents: Subagent[]
+  mcpNames: string[]
+  assignedMcps: Set<string>
+}
+
+/**
+ * Builds state from raw config data.
+ *
+ * assignedMcps tracks which MCP servers are covered by subagents.
+ * Used to report unassigned servers (no subagent handles them).
+ */
+function buildState(mcpServers: McpServer[], subagents: Subagent[]): State {
+  const assignedMcps = new Set<string>()
+  for (const sa of subagents) {
+    for (const m of sa.mcpServers) {
+      assignedMcps.add(m)
+    }
+  }
+  return {
+    mcpServers,
+    subagents,
+    mcpNames: mcpServers.map((s) => s.name),
+    assignedMcps,
+  }
+}
+
+/**
+ * OpenCode plugin entry point.
+ *
+ * Runs once when OpenCode starts. Must complete before returning —
+ * ensureToolsDisabled writes to config file and must finish before
+ * the main agent starts using tools.
+ *
+ * Returns two tools:
+ * - triage_mcp: routes queries to the best subagent
+ * - mcp_stats: shows routing status and token savings
+ */
+export const server: Plugin = async ({ directory }) => {
+  const mcpServers = await readMcpConfig(directory)
+  const subagents = await readSubagentConfig(directory)
+
+  // One-time setup: disable all MCP tools in main agent
+  // This MUST complete before plugin returns — otherwise main session
+  // could use MCP tools before they're disabled
+  await ensureToolsDisabled(directory, mcpServers.map((s) => s.name))
+
+  const state = buildState(mcpServers, subagents)
+
+  return {
+    tool: {
+      /**
+       * Triage tool: matches a user query to the best subagent.
+       *
+       * Scoring uses keyword matching against subagent name, description,
+       * and assigned MCP server names. Returns the top match if the score
+       * gap exceeds THRESHOLD, otherwise shows multiple options.
+       *
+       * Special queries:
+       * - "reload": re-reads config without restarting OpenCode
+       * - "": lists all available subagents
+       */
+      triage_mcp: tool({
+        description:
+          "Discover and route to the right MCP subagent. " +
+          "Call this before any non-trivial MCP task. " +
+          "Pass a short description of what you need. " +
+          "Returns the best matching subagent and its available MCP tools. " +
+          "Use query 'reload' to re-read MCP config without restarting.",
+        args: {
+          query: tool.schema
+            .string()
+            .describe(
+              "What you want to do — e.g. 'search library docs', " +
+                "'manage GitHub issues', 'database operations', " +
+                "or 'reload' to refresh MCP config"
+            ),
+        },
+        async execute(args) {
+          const query = args.query.trim()
+
+          // "reload" — re-read config files without restarting
+          if (query.toLowerCase() === "reload") {
+            state.mcpServers = await readMcpConfig(directory)
+            state.subagents = await readSubagentConfig(directory)
+            const fresh = buildState(state.mcpServers, state.subagents)
+            Object.assign(state, fresh)
+            const lines = ["MCP config reloaded."]
+            lines.push(
+              `Subagents: ${state.subagents.map((s) => s.name).join(", ") || "none"}`
+            )
+            lines.push(
+              `MCP servers: ${state.mcpServers.map((s) => s.name).join(", ") || "none"}`
+            )
+            return lines.join("\n")
+          }
+
+          // Empty query — list all subagents
+          if (!query) {
+            if (state.subagents.length === 0) {
+              return [
+                "No MCP subagents configured.",
+                "",
+                "Add subagents in opencode.jsonc under 'agent' section with tool scoping.",
+              ].join("\n")
+            }
+            const lines = ["Available subagents:"]
+            for (const sa of state.subagents) {
+              const mcps = sa.mcpServers.join(", ")
+              lines.push(
+                `  @${sa.name} — ${sa.description || "no description"}${mcps ? ` [${mcps}]` : ""}`
+              )
+            }
+            lines.push("")
+            lines.push("Use @agent-name in your message to invoke a subagent.")
+            return lines.join("\n")
+          }
+
+          // No subagents configured — show setup instructions
+          if (state.subagents.length === 0) {
+            return [
+              "No MCP subagents configured.",
+              "",
+              "Add subagents in opencode.jsonc:",
+              `  "agent": { "myserver": { "mode": "subagent", "description": "...", "tools": { "myserver_*": true } } }`,
+            ].join("\n")
+          }
+
+          // Score and rank subagents
+          const scored = scoreSubagents(query, state.subagents)
+            .filter((s) => s.score > 0)
+            .sort((a, b) => b.score - a.score)
+
+          // No matches — show available options
+          if (scored.length === 0) {
+            const names = state.subagents.map((s) => s.name).join(", ")
+            return [
+              `No subagent matches "${query}".`,
+              `Available: ${names}`,
+              "",
+              "Try broader keywords or call triage_mcp with empty query to list all.",
+            ].join("\n")
+          }
+
+          // Check if top match is clearly better than runner-up
+          const gap = scored[0].score - (scored[1]?.score ?? 0)
+
+          if (gap >= THRESHOLD || scored.length === 1) {
+            // Clear winner — route to it
+            const match = scored[0]
+            const mcps = match.subagent.mcpServers.join(", ")
+            const lines = [
+              `ROUTED: @${match.subagent.name}`,
+              match.subagent.description
+                ? `  ${match.subagent.description}`
+                : "",
+              mcps ? `  MCP: ${mcps}` : "",
+              `  Matched by: ${match.matchedBy}`,
+              "",
+              `Invoke with @${match.subagent.name} in your message, or use the Task tool:`,
+              `  task({ subagent_type: "${match.subagent.name}", prompt: "..." })`,
+            ]
+            return lines.join("\n")
+          }
+
+          // Too close to call — show top 5 options
+          const top = scored.slice(0, 5)
+          const lines = [`Multiple subagents match "${query}":`, ""]
+          top.forEach((s, i) => {
+            const mcps = s.subagent.mcpServers.join(", ")
+            lines.push(
+              `  ${i + 1}. @${s.subagent.name}${s.subagent.description ? ` — ${s.subagent.description}` : ""}${mcps ? ` [${mcps}]` : ""}`
+            )
+          })
+          lines.push("")
+          lines.push(
+            `Be more specific, or name the subagent directly: @${top[0].subagent.name}`
+          )
+          return lines.join("\n")
+        },
+      }),
+
+      /**
+       * Stats tool: displays routing status and token savings.
+       *
+       * Shows:
+       * - Subagent routing map (which subagent handles which MCP servers)
+       * - Unassigned servers (no subagent covers them)
+       * - Token savings confirmation (0 MCP tokens in main session)
+       * - Coverage percentage
+       */
+      mcp_stats: tool({
+        description:
+          "Show MCP subagent routing status and token savings. " +
+          "Displays which MCP servers are routed to which subagents. " +
+          "MCP tools in main session are disabled — only subagents carry them.",
+        args: {},
+        async execute() {
+          const lines: string[] = []
+          const { subagents: sa, mcpNames, assignedMcps } = state
+
+          lines.push("MCP Subagent Routing Status")
+          lines.push("")
+
+          if (sa.length === 0) {
+            lines.push("  No subagents configured.")
+            lines.push("")
+            lines.push(
+              "  Configure subagents with MCP tool scoping for token savings."
+            )
+            return lines.join("\n")
+          }
+
+          lines.push(
+            `  Strategy: Global disable → Subagent enable via tool scoping`
+          )
+          lines.push(
+            `  Subagents: ${sa.length}  |  MCP servers: ${mcpNames.length}`
+          )
+          lines.push("")
+          lines.push("  Subagent routing map:")
+          lines.push("  ─".repeat(30))
+
+          for (const s of sa) {
+            const mcps = s.mcpServers.join(", ")
+            lines.push(
+              `  @${s.name.padEnd(18)} → ${mcps || "no MCP servers"}`
+            )
+            if (s.description) {
+              lines.push(`  ${" ".repeat(19)}${s.description}`)
+            }
+          }
+
+          // Find MCP servers not assigned to any subagent
+          const unassigned = mcpNames.filter(
+            (n) => !sa.some((s) => s.mcpServers.includes(n))
+          )
+          if (unassigned.length > 0) {
+            lines.push("")
+            lines.push(
+              `  Unassigned: ${unassigned.join(", ")} (no subagent)`
+            )
+          }
+
+          const assigned = assignedMcps.size
+          const pct = mcpNames.length > 0
+            ? Math.round((assigned / mcpNames.length) * 100)
+            : 0
+
+          lines.push("")
+          lines.push("  ─".repeat(30))
+          lines.push(
+            `  MCP tools in main session: 0 tokens (globally disabled)`
+          )
+          lines.push(
+            `  MCP coverage: ${assigned}/${mcpNames.length} servers routed (${pct}%)`
+          )
+
+          return lines.join("\n")
+        },
+      }),
+    },
+  }
+}
