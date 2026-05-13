@@ -2,6 +2,14 @@
 
 On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by keeping MCP tools disabled in the main session and routing them to scoped subagents only when needed.
 
+## Why Use This Plugin
+
+- **Save tokens** — MCP tools have large descriptions. Keeping them disabled in the main session saves ~80% of MCP-related token usage
+- **No LLM overhead** — routing uses pure keyword matching, not embeddings or LLM calls
+- **Zero config after install** — automatically disables MCP tools on first run, no manual setup
+- **Smart routing** — weighted scoring across agent names, descriptions, and server names with confidence thresholds
+- **Hot reload** — refresh MCP config without restarting OpenCode (`triage_mcp query: "reload"`)
+
 ## Installation
 
 ### Local development
@@ -76,6 +84,14 @@ Shows routing status, subagent-to-server mapping, unassigned servers, and token 
 
 Slash command registered on install. Run `/mcp-triage <query>` from the OpenCode CLI.
 
+## Token Savings
+
+| Component | Without plugin | With plugin |
+|-----------|---------------|-------------|
+| MCP tools in main session | ~full descriptions | 0 tokens (disabled) |
+| Subagent sessions | N/A | only scoped server tools |
+| Estimated savings | — | ~80% of MCP tokens |
+
 ## Configuration
 
 ### MCP servers
@@ -141,14 +157,6 @@ On first run, the plugin writes disable entries to your project config:
 ```
 
 This disables MCP tools in the main session. Subagents re-enable them.
-
-## Token Savings
-
-| Component | Without plugin | With plugin |
-|-----------|---------------|-------------|
-| MCP tools in main session | ~full descriptions | 0 tokens (disabled) |
-| Subagent sessions | N/A | only scoped server tools |
-| Estimated savings | — | ~80% of MCP tokens |
 
 ## Uninstall
 
