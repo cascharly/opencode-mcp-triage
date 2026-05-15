@@ -1,7 +1,7 @@
 /*
  * opencode-mcp-triage — Subagent Router Plugin
  * ==============================================
- * Version: 0.5.0
+ * Version: 0.6.1
  * License: MIT
  *
  * Routes MCP work to scoped subagents. On first run, automatically
@@ -30,6 +30,12 @@ import { readMcpConfig, readSubagentConfig } from "./config.js"
 import { scoreSubagents, THRESHOLD } from "./triage.js"
 import { ensureToolsDisabled, ensureSubagentsCreated } from "./writer.js"
 
+/** Cache TTL: 5 seconds — balances freshness with performance */
+const CACHE_TTL_MS = 5000
+
+/** Reload debounce: 1 second cooldown to prevent spam */
+const RELOAD_COOLDOWN_MS = 1000
+
 /**
  * Mutable plugin state — updated on init and reload.
  *
@@ -43,6 +49,40 @@ interface State {
   subagents: Subagent[]
   mcpNames: string[]
   assignedMcps: Set<string>
+}
+
+/**
+ * Generic cache with TTL.
+ * Stores a value with an expiry timestamp. Returns null if expired.
+ */
+interface CacheEntry<T> {
+  value: T
+  expiresAt: number
+}
+
+interface Cache<T> {
+  get(): T | null
+  set(value: T): void
+  invalidate(): void
+}
+
+function createCache<T>(ttlMs: number): Cache<T> {
+  let entry: CacheEntry<T> | null = null
+
+  return {
+    get(): T | null {
+      if (entry && Date.now() < entry.expiresAt) {
+        return entry.value
+      }
+      return null
+    },
+    set(value: T) {
+      entry = { value, expiresAt: Date.now() + ttlMs }
+    },
+    invalidate() {
+      entry = null
+    },
+  }
 }
 
 /**
@@ -67,6 +107,23 @@ function buildState(mcpServers: McpServer[], subagents: Subagent[]): State {
 }
 
 /**
+ * Sends a TUI toast notification via OpenCode client.
+ * Gracefully handles missing client.tui (older OpenCode versions).
+ */
+function showToast(
+  client: unknown,
+  message: string,
+  variant: "success" | "info" | "error" = "info"
+) {
+  try {
+    const c = client as { tui?: { showToast?: (...args: unknown[]) => unknown } }
+    c.tui?.showToast?.({ message, variant })
+  } catch {
+    // TUI not available — silently skip
+  }
+}
+
+/**
  * OpenCode plugin entry point.
  *
  * Runs once when OpenCode starts. Must complete before returning —
@@ -77,8 +134,31 @@ function buildState(mcpServers: McpServer[], subagents: Subagent[]): State {
  * - triage_mcp: routes queries to the best subagent
  * - mcp_stats: shows routing status and token savings
  */
-export const server: Plugin = async ({ directory }) => {
-  const mcpServers = await readMcpConfig(directory)
+export const server: Plugin = async ({ directory, client }) => {
+  // Config caches with 5s TTL — picks up CLI toggles without restart
+  const mcpCache = createCache<McpServer[]>(CACHE_TTL_MS)
+  const subagentCache = createCache<Subagent[]>(CACHE_TTL_MS)
+
+  // Reload debounce: track last reload time to prevent spam
+  let lastReloadAt = 0
+
+  async function getCachedMcpServers(): Promise<McpServer[]> {
+    const cached = mcpCache.get()
+    if (cached) return cached
+    const result = await readMcpConfig(directory)
+    mcpCache.set(result)
+    return result
+  }
+
+  async function getCachedSubagents(): Promise<Subagent[]> {
+    const cached = subagentCache.get()
+    if (cached) return cached
+    const result = await readSubagentConfig(directory)
+    subagentCache.set(result)
+    return result
+  }
+
+  const mcpServers = await getCachedMcpServers()
   const mcpNames = mcpServers.map((s) => s.name)
 
   // Phase 1: disable all MCP tools in main agent
@@ -87,11 +167,12 @@ export const server: Plugin = async ({ directory }) => {
   await ensureToolsDisabled(directory, mcpNames)
 
   // Phase 2: read current subagents, then auto-create for unassigned MCPs
-  let subagents = await readSubagentConfig(directory)
+  let subagents = await getCachedSubagents()
   const created = await ensureSubagentsCreated(directory, mcpServers, subagents)
   if (created > 0) {
     // Re-read after auto-create so state is accurate
-    subagents = await readSubagentConfig(directory)
+    subagentCache.invalidate()
+    subagents = await getCachedSubagents()
   }
 
   const state = buildState(mcpServers, subagents)
@@ -99,7 +180,7 @@ export const server: Plugin = async ({ directory }) => {
   return {
     tool: {
       /**
-       * Triage tool: matches a user query to the best subagent.
+       * Triage Tool: matches a user query to the best subagent.
        *
        * Scoring uses keyword matching against subagent name, description,
        * and assigned MCP server names. Returns the top match if the score
@@ -125,20 +206,35 @@ export const server: Plugin = async ({ directory }) => {
                 "or 'reload' to refresh MCP config"
             ),
         },
-        async execute(args) {
+        async execute(args, context) {
+          // Abort signal handling — check if request was cancelled
+          if (context?.abort?.aborted) {
+            return "Triage cancelled."
+          }
+
           const query = args.query.trim()
 
           // "reload" — re-read config files without restarting
           if (query.toLowerCase() === "reload") {
-            state.mcpServers = await readMcpConfig(directory)
-            let sa = await readSubagentConfig(directory)
+            // Debounce: prevent spam reloads
+            const now = Date.now()
+            if (now - lastReloadAt < RELOAD_COOLDOWN_MS) {
+              return "Reload cooldown active. Try again in a moment."
+            }
+            lastReloadAt = now
+
+            mcpCache.invalidate()
+            subagentCache.invalidate()
+            state.mcpServers = await getCachedMcpServers()
+            let sa = await getCachedSubagents()
             const created = await ensureSubagentsCreated(
               directory,
               state.mcpServers,
               sa
             )
             if (created > 0) {
-              sa = await readSubagentConfig(directory)
+              subagentCache.invalidate()
+              sa = await getCachedSubagents()
             }
             state.subagents = sa
             const fresh = buildState(state.mcpServers, state.subagents)
@@ -153,6 +249,7 @@ export const server: Plugin = async ({ directory }) => {
             lines.push(
               `MCP servers: ${state.mcpServers.map((s) => s.name).join(", ") || "none"}`
             )
+            showToast(client, "MCP config reloaded", "success")
             return lines.join("\n")
           }
 
@@ -195,6 +292,7 @@ export const server: Plugin = async ({ directory }) => {
           // No matches — show available options
           if (scored.length === 0) {
             const names = state.subagents.map((s) => s.name).join(", ")
+            showToast(client, `No match for "${query}"`, "error")
             return [
               `No subagent matches "${query}".`,
               `Available: ${names}`,
@@ -221,6 +319,7 @@ export const server: Plugin = async ({ directory }) => {
               `Invoke with @${match.subagent.name} in your message, or use the Task tool:`,
               `  task({ subagent_type: "${match.subagent.name}", prompt: "..." })`,
             ]
+            showToast(client, `Routed to @${match.subagent.name}`, "success")
             return lines.join("\n")
           }
 
@@ -237,6 +336,7 @@ export const server: Plugin = async ({ directory }) => {
           lines.push(
             `Be more specific, or name the subagent directly: @${top[0].subagent.name}`
           )
+          showToast(client, `${scored.length} subagents match`, "info")
           return lines.join("\n")
         },
       }),

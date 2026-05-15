@@ -1,34 +1,99 @@
 # opencode-mcp-triage
 
-On-demand MCP tool activation for OpenCode. Saves ~80% of MCP-related tokens by keeping MCP tools disabled in the main session and routing them to scoped subagents only when needed.
+> opencode-mcp-triage strips MCP tool definitions from the main prompt and routes them to dedicated subagents. Instead of loading every server's tools into every message, it uses keyword matching to activate only what you need. Cuts prompt token costs by eliminating MCP tool bloat — no LLM overhead, no extra API calls, zero setup.
 
-## Why Use This Plugin
+## What It Does
 
-- **Save tokens** — MCP tools have large descriptions. Keeping them disabled in the main session saves ~80% of MCP-related token usage
-- **No LLM overhead** — routing uses pure keyword matching, not embeddings or LLM calls
-- **Zero config after install** — automatically disables MCP tools AND creates subagents on first run, no manual setup needed
-- **Smart routing** — weighted scoring across agent names, descriptions, and server names with confidence thresholds
-- **Hot reload** — refresh MCP config without restarting OpenCode (`triage_mcp query: "reload"`)
+Normally all MCP servers load their tools into the system prompt and burn tokens on every message — even when irrelevant. Triage disables all MCP tools globally and routes work to scoped subagents that carry only the tools they need.
+
+```
+Without triage:   [supabase tools] [github tools] [render tools] ...  ← always burning tokens
+With triage:      triage_mcp({ query }) → @github → github tools only
+```
+
+By default, each subagent carries one MCP server's tools. The main session carries zero. Token savings are **static per MCP server** — the same for every user with the same servers installed.
+
+This plugin is OpenCode-only — it has no effect on Claude Desktop, Cursor, Windsurf, or any other tool using the same MCP config. Your MCP servers remain fully functional everywhere else.
+
+## Token Savings
+
+Real data from this project's 6 MCP servers (measured with `opencode-mcp-triage measure`):
+
+```
+  TOKENS SAVED PER TURN (by routing MCPs to subagents)
+
+  supabase      29 tools    19255 chars  ~ 4814 tokens
+  netlify        9 tools    12322 chars  ~ 3081 tokens
+  render        24 tools    28244 chars  ~ 7061 tokens
+  clickup       51 tools   121319 chars  ~30330 tokens
+  context7       2 tools     4605 chars  ~ 1151 tokens
+  github        26 tools    15827 chars  ~ 3957 tokens
+  ----------------------------------------------------
+  TOTAL        141 tools   201572 chars  ~ 50394 tokens
+
+  Each user turn saves ~50.394 tokens
+  that would otherwise be sent with every prompt.
+```
+
+Tool definitions are static per MCP server — same savings for every user with the same servers installed. Run `opencode-mcp-triage measure` for live numbers based on your MCP inventory.
 
 ## How It Works
 
-1. **Plugin init** reads all MCP servers and subagents from `opencode.jsonc` config
-2. **Disables** all MCP tools globally (`"servername_*": false`) so they don't consume tokens in the main agent
-3. **Auto-creates** one subagent per MCP server that has no existing subagent — novice-friendly, no manual config needed
-4. **Subagents** re-enable specific servers via tool scoping (`"servername_*": true`)
-5. **`triage_mcp` tool** scores user queries against subagent names, descriptions, and MCP server names using pure keyword matching (no LLM overhead)
-6. **Routes** to the best-matching subagent or shows options when unsure
+The LLM calls `triage_mcp()` when it encounters a task that needs MCP tools. The plugin scores all subagents against the query using keyword matching and returns the best match.
 
-The scoring engine uses word-boundary matching with weighted passes:
-- Subagent name matches: weight ×3
-- MCP server name matches: weight ×3
-- Description matches: weight ×1
+```
+User: "manage GitHub issues"
+  │
+  ▼
+LLM: triage_mcp({ query: "manage GitHub issues" })
+  │
+  ▼
+Plugin: scores subagents → returns best match
+  @github         score=75  (matched: github ×3, issues in description ×1)
+  @clickup        score=0
+  gap=75 ≥ threshold(30) → HIGH CONFIDENCE
+  │
+  ▼
+LLM: invokes @github subagent → carries only github tools
+```
 
-If the top score exceeds the runner-up by ≥30 points, it auto-routes. Otherwise it shows the top 5 options for you to choose.
+No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
-## Installation
+### Scoring Engine
 
-### Local development
+- **Subagent name** matches: weight ×3
+- **MCP server name** matches: weight ×3
+- **Description** matches: weight ×1
+
+Clear winner (gap ≥ 30): auto-routes. Too close: shows top 5 options. No matches: lists all available subagents.
+
+## Quick Start
+
+```bash
+npm install -g opencode-mcp-triage
+```
+
+Restart OpenCode. The plugin auto-disables all MCP tools and auto-creates one subagent per MCP server. No manual config needed. Type `/mcp-triage status` to verify.
+
+## Install
+
+### Global (recommended)
+
+```bash
+npm install -g opencode-mcp-triage
+```
+
+Restart OpenCode. `/mcp-triage` is available in **every** project.
+
+### Per-project
+
+```bash
+npm install opencode-mcp-triage
+```
+
+Restart OpenCode. `/mcp-triage` is available only in this project.
+
+### Dev / local
 
 ```bash
 git clone https://github.com/cascharly/opencode-mcp-triage.git
@@ -36,166 +101,137 @@ cd opencode-mcp-triage
 npm install
 ```
 
-Then add to your opencode config:
+Add to your opencode config:
 
 ```jsonc
-{
-  "plugin": ["file:/path/to/opencode-mcp-triage"]
-}
+{ "plugin": ["file:/path/to/opencode-mcp-triage"] }
 ```
 
-### Global (all projects)
+## LLM Quick-Install
 
-Add to `~/.config/opencode/opencode.jsonc`:
+Copy-paste this into any LLM:
 
-```jsonc
-{
-  "plugin": ["file:/path/to/opencode-mcp-triage"]
-}
+```text
+Install opencode-mcp-triage (https://github.com/cascharly/opencode-mcp-triage) — a deterministic MCP subagent router for OpenCode.
+
+1. Run: npm install -g opencode-mcp-triage
+2. If any errors occur, visit the repo link above and resolve them.
+3. Tell me to restart OpenCode.
 ```
-
-### Per-project
-
-Add to `.opencode/opencode.jsonc` or project-root `opencode.jsonc`:
-
-```jsonc
-{
-  "plugin": ["file:/path/to/opencode-mcp-triage"]
-}
-```
-
-## Commands
-
-### `triage_mcp`
-
-Routes a task description to the right subagent.
-
-```
-query: "manage github issues" → @github
-query: "search library docs" → @context7
-query: "" → list all subagents
-query: "reload" → re-read config without restarting
-```
-
-### `mcp_stats`
-
-Shows routing status, subagent-to-server mapping, unassigned servers, and token savings.
-
-### `/mcp-triage`
-
-Slash command registered on install. Run `/mcp-triage <query>` from the OpenCode CLI.
-
-## Token Savings
-
-| Component | Without plugin | With plugin |
-|-----------|---------------|-------------|
-| MCP tools in main session | ~full descriptions | 0 tokens (disabled) |
-| Subagent sessions | N/A | only scoped server tools |
-| Estimated savings | — | ~80% of MCP tokens |
 
 ## Configuration
 
-### MCP servers
+The plugin handles everything automatically — no manual editing required. This section shows what gets generated and how to customize it if needed.
 
-Define servers in `opencode.jsonc`:
+### Auto-generated config
 
-```jsonc
-{
-  "mcp": {
-    "github": {
-      "type": "local",
-      "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
-      "enabled": true,
-      "environment": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
-      }
-    },
-    "supabase": {
-      "type": "remote",
-      "url": "https://mcp.supabase.com/mcp",
-      "enabled": true
-    }
-  }
-}
-```
-
-### Subagents
-
-Define subagents with tool scoping to route MCP servers:
-
-```jsonc
-{
-  "agent": {
-    "github": {
-      "description": "GitHub issue/PR management",
-      "mode": "subagent",
-      "tools": {
-        "github_*": true
-      }
-    },
-    "supabase": {
-      "description": "Supabase database management",
-      "mode": "subagent",
-      "tools": {
-        "supabase_*": true
-      }
-    }
-  }
-}
-```
-
-### Tools block (auto-generated)
-
-On first run, the plugin writes disable entries to your project config:
+On first run, the plugin writes tool disable entries and auto-creates one subagent per MCP server:
 
 ```jsonc
 {
   "tools": {
     "github_*": false,
-    "supabase_*": false
-  }
-}
-```
-
-This disables MCP tools in the main session. Subagents re-enable them.
-
-### Auto-created subagents (auto-generated)
-
-On first run (and on `triage_mcp query: "reload"`), the plugin creates one subagent per MCP server that doesn't already have one:
-
-```jsonc
-{
+    "render_*": false
+  },
   "agent": {
     "github": {
       "description": "GitHub issue/PR management",
       "mode": "subagent",
-      "tools": {
-        "github_*": true
-      }
+      "tools": { "github_*": true }
     }
   }
 }
 ```
 
-The subagent name matches the MCP server name, and its description comes from the server's `description` field (or falls back to `"<name> operations"`).
+## Commands
+
+### Plugin Tools
+
+| Tool | What it does |
+|---|---|
+| `triage_mcp` | Route a task to the right MCP subagent using keyword matching |
+| `mcp_stats` | Show routing status, subagent-to-server map, and coverage |
+
+### CLI Commands (available in terminal AND as `/mcp-triage <command>`)
+
+| Command | What it does |
+|---|---|
+| `status` | Show MCP server status, hidden/exposed tools, subagent routing |
+| `list` | List all configured MCP servers and subagents |
+| `measure` | Connect to each MCP server and measure token savings per turn |
+| `help` | Show available commands |
+
+### Flags
+
+| Flag | Where | What it does |
+|---|---|---|
+| `--json` | All commands | Machine-readable JSON output |
+| `--verbose` | `measure` | Show error diagnostics (HTTP codes, spawn errors, timeouts) |
+| `--timeout=N` | `measure` | Per-server timeout in seconds (default: 60) |
+
+All CLI commands can be run directly in your terminal via `npx opencode-mcp-triage <command>` (e.g., `npx opencode-mcp-triage measure --verbose`). No OpenCode session needed.
+
+## Under the Hood
+
+### Plugin Activation
+
+`opencode-mcp-triage` is a standard opencode plugin registered in the `"plugin"` array of `opencode.jsonc` (both `~/.config/opencode/opencode.jsonc` globally and `.opencode/opencode.jsonc` per-project). On startup, opencode loads all listed plugins, making their tools and commands available. The plugin registers `triage_mcp` and `mcp_stats` in the system prompt alongside `read`, `write`, `bash`, etc.
+
+### How Tool Disabling Works
+
+The plugin writes `"servername_*": false` entries to the `"tools"` block of your project config. OpenCode uses glob patterns to match tools — `"github_*": false` disables all tools from the github MCP server in the main session.
+
+```
+Main session tools:
+  github_*: false          ← disabled, 0 tokens
+  supabase_*: false        ← disabled, 0 tokens
+  render_*: false          ← disabled, 0 tokens
+
+@github subagent tools:
+  github_*: true           ← enabled, ~4K tokens in subagent sessions only
+```
+
+MCP tool definitions are never loaded in the main session — they stay isolated in subagent contexts.
+
+### Auto-Created Subagents
+
+On first run, the plugin creates one subagent per MCP server that doesn't already have one. The subagent name matches the server name, and its description comes from the server's `description` field.
 
 **Behavior:**
 - Already-covered MCP servers are skipped — existing user-defined subagents are never touched
-- Deleting an auto-created subagent is respected — it won't be re-created on next reload (tracked via `.opencode/mcp-triage.json`)
-- Adding a new MCP server later auto-creates its subagent on reload
-- Power users can delete auto-created entries and define their own grouped subagents
+- Deleting an auto-created subagent is respected — tracked via `.opencode/mcp-triage.json`
+- Adding a new MCP server later auto-creates its subagent on reload (`triage_mcp query: "reload"`)
+- Power users can delete auto-created entries and define grouped subagents if desired, though separate subagents save more tokens per query
+
+### Config Caching
+
+MCP server and subagent config reads are cached with a 5-second TTL. CLI toggles (add/remove MCP servers, change subagents) are picked up within 5 seconds without restarting OpenCode. Reload manually with `triage_mcp query: "reload"`.
 
 ## Uninstall
 
-1. Remove `opencode-mcp-triage` from the `plugin` array in your `opencode.jsonc`
-2. Remove the auto-generated `"servername_*": false` entries from the `"tools"` block to restore full MCP tool access
-3. (Optional) Remove any auto-created subagents from the `"agent"` block
+1. Remove `"opencode-mcp-triage"` from the `"plugin"` array in your config
+2. Remove the auto-generated `"servername_*": false` entries from `"tools"`
+3. (Optional) Remove any auto-created subagents from `"agent"`
 4. (Optional) Delete the lock file at `.opencode/mcp-triage.json`
-5. Remove the slash command:
+5. Delete the slash command:
 
 ```bash
+# macOS / Linux
 rm ~/.config/opencode/commands/mcp-triage.md
 ```
+
+```cmd
+:: Windows (cmd)
+del %USERPROFILE%\.config\opencode\commands\mcp-triage.md
+```
+
+Restart OpenCode. Clean.
+
+## Compatibility
+
+- OpenCode 1.14+
+- Node.js 18+ (for CLI)
+- TypeScript 6+ (for development)
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-mcp-triage",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "On-demand MCP tool activation for OpenCode — saves ~80% tokens by shrinking MCP tool descriptions and routing via keyword matching",
   "license": "MIT",
   "author": "Carlos Spagnoletti",
@@ -28,6 +28,8 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run check",
     "postinstall": "node postinstall.cjs"
   },
@@ -44,9 +46,10 @@
     "url": "https://github.com/cascharly/opencode-mcp-triage"
   },
   "devDependencies": {
-    "@types/node": ">=22",
-    "typescript": "^5.7",
-    "@opencode-ai/plugin": ">=1.14.0"
+    "@opencode-ai/plugin": ">=1.14.0",
+    "@types/node": "25.7.0",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.6"
   },
   "engines": {
     "node": ">=18"

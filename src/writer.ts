@@ -20,10 +20,43 @@
  */
 
 import { readFile, writeFile, mkdir } from "node:fs/promises"
-import { join, dirname } from "node:path"
+import { join, dirname, sep } from "node:path"
 import { homedir } from "node:os"
 import { readLock, writeLock } from "./lock.js"
 import type { McpServer, Subagent } from "./types.js"
+
+/** Max config file size: 1MB — prevents memory exhaustion */
+const MAX_CONFIG_SIZE = 1024 * 1024
+
+/**
+ * Strips UTF-8 BOM (Byte Order Mark) from string.
+ * BOM is the 3-byte sequence: EF BB BF (U+FEFF)
+ */
+function stripBOM(s: string): string {
+  if (s.length > 0 && s.charCodeAt(0) === 0xfeff) {
+    return s.slice(1)
+  }
+  return s
+}
+
+/**
+ * Validates a file path against path traversal attacks.
+ * Rejects paths containing null bytes or .. path segments.
+ */
+function validatePath(path: string): boolean {
+  if (path.includes("\0")) return false
+  const segments = path.split(sep)
+  if (segments.includes("..")) return false
+  return true
+}
+
+/**
+ * Writes a file, creating parent directories as needed.
+ */
+async function safeWriteFile(path: string, content: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, content, "utf-8")
+}
 
 /**
  * Ensures all MCP server tools are disabled in the main agent's tools config.
@@ -51,6 +84,8 @@ export async function ensureToolsDisabled(
   if (exists) {
     try {
       raw = await readFile(configPath, "utf-8")
+      // Size limit: reject files > 1MB
+      if (raw.length > MAX_CONFIG_SIZE) return false
     } catch {
       return false
     }
@@ -58,6 +93,9 @@ export async function ensureToolsDisabled(
     // No project config exists — start with empty object
     raw = "{}"
   }
+
+  // Strip BOM (Windows editors may prepend it)
+  raw = stripBOM(raw)
 
   // Strip comments before checking — comments like // "github_*": false
   // should not count as actual disable entries
@@ -121,8 +159,6 @@ export async function ensureToolsDisabled(
     }
   }
 
-  await mkdir(dirname(configPath), { recursive: true })
-
   // Safety check: validate the modified content parses as valid JSON
   // Catches bugs in string manipulation before corrupting the config file
   try {
@@ -131,7 +167,7 @@ export async function ensureToolsDisabled(
     throw new Error("Generated invalid JSONC when disabling MCP tools")
   }
 
-  await writeFile(configPath, modified, "utf-8")
+  await safeWriteFile(configPath, modified)
   return true
 }
 
@@ -185,9 +221,14 @@ export async function ensureSubagentsCreated(
   let raw: string
   try {
     raw = await readFile(resolved.path, "utf-8")
+    // Size limit: reject files > 1MB
+    if (raw.length > MAX_CONFIG_SIZE) return 0
   } catch {
     raw = "{}"
   }
+
+  // Strip BOM (Windows editors may prepend it)
+  raw = stripBOM(raw)
 
   // Build subagent entries as JSON text
   const entries = toCreate.map((mcp) => {
@@ -250,8 +291,7 @@ export async function ensureSubagentsCreated(
     throw new Error("Generated invalid JSONC when creating subagent entries")
   }
 
-  await mkdir(dirname(resolved.path), { recursive: true })
-  await writeFile(resolved.path, modified, "utf-8")
+  await safeWriteFile(resolved.path, modified)
 
   // Update lock file
   const newAutoCreated: Record<string, string> = {
@@ -294,6 +334,7 @@ async function findProjectConfigPath(
   ]
 
   for (const path of paths) {
+    if (!validatePath(path)) continue
     try {
       await readFile(path, "utf-8")
       return { path, exists: true }
@@ -310,6 +351,7 @@ async function findProjectConfigPath(
   ]
 
   for (const path of globalPaths) {
+    if (!validatePath(path)) continue
     try {
       await readFile(path, "utf-8")
       // Global has config — create project-level tools-only override

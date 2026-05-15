@@ -7,5 +7,6 @@
     "clickup_*": false,
     "context7_*": false,
     "github_*": false
-  }
+  },
+  "plugin": []
 }

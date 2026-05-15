@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.5.0 (2026-05-13)
+## 0.7.0 (2026-05-14)
+
+- Auto-create subagents for unassigned MCP servers on init and reload
+- Lock file tracking for auto-created subagents — user deletions are respected
+- Config reload without restarting (`triage_mcp query: "reload"`)
+- Lock file tests for read/write, oversized files, invalid JSON
+
+## 0.6.0 (2026-05-13)
 
 - Initial release
 - Keyword-based triage engine for routing MCP queries to subagents

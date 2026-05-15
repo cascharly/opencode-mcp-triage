@@ -13,12 +13,36 @@
  * IMPORTANT: findAndParseConfig requires json.mcp or json.agent to exist.
  * Without this guard, any random opencode.json in the project could be
  * misinterpreted as opencode config.
+ *
+ * Security: BOM stripping, 1MB size limit, path traversal defense.
  */
 
 import type { McpServer, McpConfigEntry, Subagent } from "./types.js"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { homedir } from "node:os"
+
+/** Max config file size: 1MB — prevents memory exhaustion */
+const MAX_CONFIG_SIZE = 1024 * 1024
+
+/**
+ * Strips UTF-8 BOM (Byte Order Mark) from string.
+ * Windows editors (Notepad, VSCode) may prepend BOM which breaks parsing.
+ * BOM is the 3-byte sequence: EF BB BF (U+FEFF)
+ */
+function stripBOM(s: string): string {
+  if (s.length > 0 && s.charCodeAt(0) === 0xfeff) {
+    return s.slice(1)
+  }
+  return s
+}
+
+interface SubagentConfig {
+  mode?: string
+  description?: string
+  tools?: Record<string, boolean>
+  [key: string]: unknown
+}
 
 /**
  * Reads all MCP servers from global + project config, merged.
@@ -69,11 +93,11 @@ export async function readSubagentConfig(
   const globalConfig = await findAndParseConfig(homedir())
   const projectConfig = await findAndParseConfig(directory)
 
-  const globalAgent = (globalConfig?.agent as Record<string, any> | undefined) ?? {}
-  const projectAgent = (projectConfig?.agent as Record<string, any> | undefined) ?? {}
+  const globalAgent = (globalConfig?.agent as Record<string, SubagentConfig> | undefined) ?? {}
+  const projectAgent = (projectConfig?.agent as Record<string, SubagentConfig> | undefined) ?? {}
 
   // Project overrides global for same-named agents
-  const merged: Record<string, any> = { ...globalAgent, ...projectAgent }
+  const merged: Record<string, SubagentConfig> = { ...globalAgent, ...projectAgent }
 
   const result: Subagent[] = []
 
@@ -114,8 +138,58 @@ export async function readSubagentConfig(
  * like // inside strings. For production use, consider a proper JSONC library.
  */
 function stripJsonc(raw: string): string {
-  let result = raw.replace(/\/\*[\s\S]*?\*\//g, "")
-  result = result.replace(/(?<!:)\/\/.*$/gm, "")
+  let result = ""
+  let inString = false
+  let escape = false
+  let i = 0
+
+  while (i < raw.length) {
+    const ch = raw[i]
+
+    if (inString) {
+      result += ch
+      if (escape) {
+        escape = false
+      } else if (ch === "\\") {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      i++
+      continue
+    }
+
+    // Block comment: /* ... */
+    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "*") {
+      i += 2
+      while (i < raw.length) {
+        if (raw[i] === "*" && i + 1 < raw.length && raw[i + 1] === "/") {
+          i += 2
+          break
+        }
+        i++
+      }
+      continue
+    }
+
+    // Line comment: // ... (only when not inside a string)
+    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
+      i += 2
+      while (i < raw.length && raw[i] !== "\n") {
+        i++
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+    }
+
+    result += ch
+    i++
+  }
+
+  // Strip trailing commas before } or ]
   result = result.replace(/,(?=\s*[}\]])/g, "")
   return result
 }
@@ -152,7 +226,14 @@ async function findAndParseConfig(
   for (const path of paths) {
     try {
       const raw = await readFile(path, "utf-8")
-      const json = JSON.parse(stripJsonc(raw))
+
+      // Size limit: reject files > 1MB to prevent memory exhaustion
+      if (raw.length > MAX_CONFIG_SIZE) continue
+
+      // Strip BOM (Windows editors may prepend it)
+      const cleaned = stripBOM(raw)
+
+      const json = JSON.parse(stripJsonc(cleaned))
       // Guard: must have mcp or agent keys to be valid opencode config
       if (json && (json.mcp || json.agent)) return json
     } catch {
