@@ -17,6 +17,7 @@
  */
 
 import type { Subagent, ScoredSubagent } from "./types.js"
+import { escapeRegex } from "./utils.js"
 
 /** Minimum score gap between top two candidates for confident routing */
 export const THRESHOLD = 30
@@ -27,24 +28,6 @@ const NAME_WEIGHT = 3
 /** Multiplier for description matches (lower — more noise) */
 const DESC_WEIGHT = 1
 
-/**
- * Escapes regex special characters in a string.
- * Used when building dynamic regex patterns from user input or config values.
- */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")
-}
-
-/**
- * Scores a single word against a target string.
- *
- * Returns:
- * - 15 if word matches as a whole word (boundary match)
- * - 10 if word is a substring of target
- * - 0 if no match
- *
- * Case-insensitive. Boundary match uses \b word boundaries.
- */
 function getWordBonus(word: string, target: string): number {
   const re = new RegExp(`\\b${escapeRegex(word)}\\b`, "i")
   if (re.test(target)) return 15

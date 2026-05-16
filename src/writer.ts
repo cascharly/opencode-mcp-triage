@@ -20,43 +20,11 @@
  */
 
 import { readFile, writeFile, mkdir } from "node:fs/promises"
-import { join, dirname, sep } from "node:path"
+import { join, dirname } from "node:path"
 import { homedir } from "node:os"
 import { readLock, writeLock } from "./lock.js"
 import type { McpServer, Subagent } from "./types.js"
-
-/** Max config file size: 1MB — prevents memory exhaustion */
-const MAX_CONFIG_SIZE = 1024 * 1024
-
-/**
- * Strips UTF-8 BOM (Byte Order Mark) from string.
- * BOM is the 3-byte sequence: EF BB BF (U+FEFF)
- */
-function stripBOM(s: string): string {
-  if (s.length > 0 && s.charCodeAt(0) === 0xfeff) {
-    return s.slice(1)
-  }
-  return s
-}
-
-/**
- * Validates a file path against path traversal attacks.
- * Rejects paths containing null bytes or .. path segments.
- */
-function validatePath(path: string): boolean {
-  if (path.includes("\0")) return false
-  const segments = path.split(sep)
-  if (segments.includes("..")) return false
-  return true
-}
-
-/**
- * Writes a file, creating parent directories as needed.
- */
-async function safeWriteFile(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, content, "utf-8")
-}
+import { MAX_CONFIG_SIZE, stripBOM, validatePath, escapeRegex, safeWriteFile } from "./utils.js"
 
 /**
  * Ensures all MCP server tools are disabled in the main agent's tools config.
@@ -102,7 +70,7 @@ export async function ensureToolsDisabled(
   const stripped = stripJsonComments(raw)
   const missing = mcpServers.filter((name) => {
     const regex = new RegExp(
-      `"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}_\\*"\\s*:\\s*false`
+      `"${escapeRegex(name)}_\\*"\\s*:\\s*false`
     )
     return !regex.test(stripped)
   })

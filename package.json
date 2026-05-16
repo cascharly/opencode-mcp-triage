@@ -1,6 +1,6 @@
 {
   "name": "opencode-mcp-triage",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "On-demand MCP tool activation for OpenCode — saves ~80% tokens by shrinking MCP tool descriptions and routing via keyword matching",
   "license": "MIT",
   "author": "Carlos Spagnoletti",
@@ -16,7 +16,7 @@
   "type": "module",
   "main": "src/index.ts",
   "bin": {
-    "opencode-mcp-triage": "./bin/opencode-mcp-triage.cjs"
+    "opencode-mcp-triage": "bin/cli.js"
   },
   "files": [
     "src/",
@@ -28,9 +28,9 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.cli.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run check",
     "postinstall": "node postinstall.cjs"
   },
   "peerDependencies": {
@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cascharly/opencode-mcp-triage"
+    "url": "git+https://github.com/cascharly/opencode-mcp-triage.git"
   },
   "devDependencies": {
     "@opencode-ai/plugin": ">=1.14.0",
@@ -56,5 +56,12 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "directories": {
+    "test": "test"
+  },
+  "bugs": {
+    "url": "https://github.com/cascharly/opencode-mcp-triage/issues"
+  },
+  "homepage": "https://github.com/cascharly/opencode-mcp-triage#readme"
 }

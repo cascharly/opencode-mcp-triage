@@ -8,5 +8,5 @@
     "context7_*": false,
     "github_*": false
   },
-  "plugin": []
+  "plugin": ["opencode-mcp-triage"]
 }

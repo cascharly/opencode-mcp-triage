@@ -1,7 +1,7 @@
 /*
  * opencode-mcp-triage — Subagent Router Plugin
  * ==============================================
- * Version: 0.6.1
+ * Version: 0.8.0
  * License: MIT
  *
  * Routes MCP work to scoped subagents. On first run, automatically
@@ -29,6 +29,7 @@ import type { McpServer, Subagent } from "./types.js"
 import { readMcpConfig, readSubagentConfig } from "./config.js"
 import { scoreSubagents, THRESHOLD } from "./triage.js"
 import { ensureToolsDisabled, ensureSubagentsCreated } from "./writer.js"
+import { calcAssignedMcps } from "./utils.js"
 
 /** Cache TTL: 5 seconds — balances freshness with performance */
 const CACHE_TTL_MS = 5000
@@ -92,17 +93,11 @@ function createCache<T>(ttlMs: number): Cache<T> {
  * Used to report unassigned servers (no subagent handles them).
  */
 function buildState(mcpServers: McpServer[], subagents: Subagent[]): State {
-  const assignedMcps = new Set<string>()
-  for (const sa of subagents) {
-    for (const m of sa.mcpServers) {
-      assignedMcps.add(m)
-    }
-  }
   return {
     mcpServers,
     subagents,
     mcpNames: mcpServers.map((s) => s.name),
-    assignedMcps,
+    assignedMcps: calcAssignedMcps(subagents),
   }
 }
 
@@ -142,20 +137,41 @@ export const server: Plugin = async ({ directory, client }) => {
   // Reload debounce: track last reload time to prevent spam
   let lastReloadAt = 0
 
+  // Read locks: prevent redundant concurrent config reads when cache is cold
+  let mcpReadLock: Promise<McpServer[]> | null = null
+
   async function getCachedMcpServers(): Promise<McpServer[]> {
     const cached = mcpCache.get()
     if (cached) return cached
-    const result = await readMcpConfig(directory)
-    mcpCache.set(result)
-    return result
+    if (mcpReadLock) return mcpReadLock
+    mcpReadLock = (async () => {
+      try {
+        const result = await readMcpConfig(directory)
+        mcpCache.set(result)
+        return result
+      } finally {
+        mcpReadLock = null
+      }
+    })()
+    return mcpReadLock
   }
+
+  let subagentReadLock: Promise<Subagent[]> | null = null
 
   async function getCachedSubagents(): Promise<Subagent[]> {
     const cached = subagentCache.get()
     if (cached) return cached
-    const result = await readSubagentConfig(directory)
-    subagentCache.set(result)
-    return result
+    if (subagentReadLock) return subagentReadLock
+    subagentReadLock = (async () => {
+      try {
+        const result = await readSubagentConfig(directory)
+        subagentCache.set(result)
+        return result
+      } finally {
+        subagentReadLock = null
+      }
+    })()
+    return subagentReadLock
   }
 
   const mcpServers = await getCachedMcpServers()
@@ -420,6 +436,66 @@ export const server: Plugin = async ({ directory, client }) => {
           return lines.join("\n")
         },
       }),
+    },
+
+    /**
+     * Cache warming: pre-fetch config on every user message.
+     * Ensures triage tool has fresh data without waiting for first call.
+     */
+    async "chat.message"() {
+      getCachedMcpServers().catch(() => {})
+      getCachedSubagents().catch(() => {})
+    },
+
+    /**
+     * Post-tool execution: inject routing hints into tool output.
+     *
+     * Detects patterns that suggest MCP-related work and appends
+     * a hint to use triage_mcp for routing.
+     */
+    async "tool.execute.after"(_input, output) {
+      if (output.output === undefined) return
+
+      const text = output.output
+      const hints: string[] = []
+
+      if (text.includes("CONFLICT") || text.includes("merge conflict")) {
+        hints.push("[Hint] Merge conflicts detected. Use triage_mcp with 'git' to find the right subagent.")
+      }
+
+      if (/\brg\b/.test(text) || /\bgrep\b/.test(text)) {
+        hints.push("[Hint] For code search, try triage_mcp with 'search code' to route to a code-aware subagent.")
+      }
+
+      if (text.includes("ERR!") && (text.includes("npm") || text.includes("npx"))) {
+        hints.push("[Hint] Package error detected. Use triage_mcp with 'package' or 'npm' for routing.")
+      }
+
+      if (hints.length > 0) {
+        output.output = text + "\n\n" + hints.join("\n")
+      }
+    },
+
+    /**
+     * System prompt transform: inject MCP routing status into system prompt.
+     *
+     * Adds a compact summary of available MCP subagents so the AI knows
+     * about routing without needing to call triage_mcp first.
+     */
+    async "experimental.chat.system.transform"(_input, output) {
+      const mcpServers = await getCachedMcpServers()
+      const subagents = await getCachedSubagents()
+
+      if (subagents.length === 0) return
+
+      const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_\-\. ]/g, "")
+
+      const routes = subagents
+        .map((sa) => `@${sanitize(sa.name)} → ${sa.mcpServers.map(sanitize).join(", ")}`)
+        .join("; ")
+
+      const routingInfo = `MCP Routing: ${subagents.length} subagent(s) available. ${routes}. Use triage_mcp tool to route queries.`
+      output.system.push(routingInfo)
     },
   }
 }

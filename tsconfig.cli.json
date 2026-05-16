@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "verbatimModuleSyntax": true,
+    "outDir": "bin",
+    "rootDir": "src",
+    "noEmit": false
+  },
+  "include": ["src/cli.ts", "src/config.ts", "src/types.ts", "src/utils.ts", "src/triage.ts", "src/lock.ts", "src/writer.ts"]
+}

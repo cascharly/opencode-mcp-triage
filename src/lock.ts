@@ -1,5 +1,6 @@
-import { readFile, writeFile, mkdir, stat, rename } from "node:fs/promises"
-import { join, dirname } from "node:path"
+import { readFile, stat, rename } from "node:fs/promises"
+import { join } from "node:path"
+import { safeWriteFile } from "./utils.js"
 
 const LOCK_FILENAME = "mcp-triage.json"
 
@@ -28,15 +29,14 @@ export async function writeLock(
   lock: LockFile
 ): Promise<void> {
   const path = join(directory, ".opencode", LOCK_FILENAME)
-  await mkdir(dirname(path), { recursive: true })
 
   // Atomic write: write to temp file then rename
   const tmpPath = path + ".tmp"
-  await writeFile(tmpPath, JSON.stringify(lock, null, 2) + "\n", "utf-8")
+  await safeWriteFile(tmpPath, JSON.stringify(lock, null, 2) + "\n")
   try {
     await rename(tmpPath, path)
   } catch {
     // Rename failed (cross-device) — fallback to direct write
-    await writeFile(path, JSON.stringify(lock, null, 2) + "\n", "utf-8")
+    await safeWriteFile(path, JSON.stringify(lock, null, 2) + "\n")
   }
 }

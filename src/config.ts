@@ -18,30 +18,35 @@
  */
 
 import type { McpServer, McpConfigEntry, Subagent } from "./types.js"
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { homedir } from "node:os"
-
-/** Max config file size: 1MB — prevents memory exhaustion */
-const MAX_CONFIG_SIZE = 1024 * 1024
-
-/**
- * Strips UTF-8 BOM (Byte Order Mark) from string.
- * Windows editors (Notepad, VSCode) may prepend BOM which breaks parsing.
- * BOM is the 3-byte sequence: EF BB BF (U+FEFF)
- */
-function stripBOM(s: string): string {
-  if (s.length > 0 && s.charCodeAt(0) === 0xfeff) {
-    return s.slice(1)
-  }
-  return s
-}
+import { MAX_CONFIG_SIZE, stripBOM, validatePath } from "./utils.js"
 
 interface SubagentConfig {
   mode?: string
   description?: string
   tools?: Record<string, boolean>
   [key: string]: unknown
+}
+
+/**
+ * Returns the list of config paths to check for a given base directory.
+ * Global and project paths differ in search order and location.
+ */
+function getConfigPaths(baseDir: string): string[] {
+  const isGlobal = baseDir === homedir()
+  return isGlobal
+    ? [
+        join(baseDir, ".config", "opencode", "opencode.jsonc"),
+        join(baseDir, ".config", "opencode", "opencode.json"),
+      ]
+    : [
+        join(baseDir, ".opencode", "opencode.json"),
+        join(baseDir, ".opencode", "opencode.jsonc"),
+        join(baseDir, "opencode.jsonc"),
+        join(baseDir, "opencode.json"),
+      ]
 }
 
 /**
@@ -210,20 +215,10 @@ function stripJsonc(raw: string): string {
 async function findAndParseConfig(
   baseDir: string
 ): Promise<Record<string, unknown> | null> {
-  const isGlobal = baseDir === homedir()
-  const paths = isGlobal
-    ? [
-        join(baseDir, ".config", "opencode", "opencode.jsonc"),
-        join(baseDir, ".config", "opencode", "opencode.json"),
-      ]
-    : [
-        join(baseDir, ".opencode", "opencode.json"),
-        join(baseDir, ".opencode", "opencode.jsonc"),
-        join(baseDir, "opencode.jsonc"),
-        join(baseDir, "opencode.json"),
-      ]
+  const paths = getConfigPaths(baseDir)
 
   for (const path of paths) {
+    if (!validatePath(path)) continue
     try {
       const raw = await readFile(path, "utf-8")
 
@@ -238,6 +233,55 @@ async function findAndParseConfig(
       if (json && (json.mcp || json.agent)) return json
     } catch {
       // File not found or invalid JSON — try next path
+    }
+  }
+
+  return null
+}
+
+/**
+ * Reads a raw opencode config file (any JSONC format) from a directory.
+ * Unlike findAndParseConfig, this does NOT require "mcp" or "agent" keys.
+ * Used by CLI to read full config including "tools" and "plugin" sections.
+ *
+ * Returns null if no valid config file is found.
+ */
+export async function readRawConfig(
+  baseDir: string
+): Promise<Record<string, unknown> | null> {
+  const paths = getConfigPaths(baseDir)
+
+  for (const path of paths) {
+    if (!validatePath(path)) continue
+    try {
+      const raw = await readFile(path, "utf-8")
+      if (raw.length > MAX_CONFIG_SIZE) continue
+      const cleaned = stripBOM(raw)
+      return JSON.parse(stripJsonc(cleaned))
+    } catch {
+      // File not found or invalid — try next
+    }
+  }
+
+  return null
+}
+
+/**
+ * Finds the path of the first existing opencode config file.
+ * Returns the file path string or null if none exist.
+ */
+export async function findConfigPath(
+  baseDir: string
+): Promise<string | null> {
+  const paths = getConfigPaths(baseDir)
+
+  for (const path of paths) {
+    if (!validatePath(path)) continue
+    try {
+      const s = await stat(path)
+      if (s.isFile() && s.size <= MAX_CONFIG_SIZE) return path
+    } catch {
+      // File not found — try next
     }
   }
 
