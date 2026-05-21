@@ -38,8 +38,8 @@ describe("scoreSubagents", () => {
   })
 
   it("filters words shorter than MIN_WORD_LENGTH", () => {
-    const result = scoreSubagents("do it go", mockSubagents)
-    expect(result.filter((s) => s.score > 0)).toEqual([])
+    const result = scoreSubagents("a", mockSubagents)
+    expect(result).toEqual([])
   })
 
   it("scores exact word boundary match higher than substring", () => {
@@ -101,7 +101,7 @@ describe("scoreSubagents", () => {
       .filter((s) => s.score > 0)[0]
 
     expect(result.matchedBy).toContain("name:github")
-    expect(result.matchedBy).toContain("mcp:github")
+    expect(result.matchedBy).toContain("mcp:github:github")
   })
 
   it("handles Unicode query words", () => {
@@ -116,11 +116,10 @@ describe("scoreSubagents", () => {
     expect(result.filter((s) => s.score > 0).length).toBeGreaterThan(0)
   })
 
-  it("returns all subagents with scores (caller filters)", () => {
+  it("returns only subagents with positive score", () => {
     const result = scoreSubagents("github", mockSubagents)
-    // All subagents returned, but only github has score > 0
-    expect(result.length).toBe(mockSubagents.length)
-    expect(result.filter((s) => s.score > 0).length).toBe(1)
+    expect(result.length).toBe(1)
+    expect(result[0].subagent.name).toBe("github")
   })
 
   it("handles special regex characters in query", () => {

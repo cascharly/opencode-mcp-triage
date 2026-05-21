@@ -87,13 +87,55 @@ function isPluginActive(
   )
 }
 
+/**
+ * Extracts tool patterns explicitly disabled (set to false).
+ * Takes tools map directly (not whole config) for flexibility.
+ */
 function extractDisabledPatterns(
-  config: Record<string, unknown>
+  tools: Record<string, unknown>
 ): string[] {
-  const tools = (config.tools as Record<string, unknown>) || {}
   return Object.entries(tools)
     .filter(([, v]) => v === false)
     .map(([k]) => k)
+}
+
+/**
+ * Merged configs from both levels with project-over-global semantics.
+ * Single read reduces I/O — used by cmdStatus, cmdList, cmdMeasure.
+ */
+interface MergedConfigs {
+  project: Record<string, unknown> | null
+  global: Record<string, unknown> | null
+  mcp: Record<string, McpConfigEntry>
+  agent: Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }>
+  tools: Record<string, unknown>
+}
+
+/**
+ * Reads global + project config in parallel and merges all sections.
+ * Project overrides global for same-named entries.
+ */
+async function loadMergedConfigs(cwd: string): Promise<MergedConfigs> {
+  const [project, global] = await Promise.all([
+    readRawConfig(cwd),
+    readRawConfig(homedir()),
+  ])
+  return {
+    project,
+    global,
+    mcp: {
+      ...(global?.mcp as Record<string, McpConfigEntry> || {}),
+      ...(project?.mcp as Record<string, McpConfigEntry> || {}),
+    },
+    agent: {
+      ...(global?.agent as Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }> || {}),
+      ...(project?.agent as Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }> || {}),
+    },
+    tools: {
+      ...(global?.tools as Record<string, unknown> || {}),
+      ...(project?.tools as Record<string, unknown> || {}),
+    },
+  }
 }
 
 // ── Commands ───────────────────────────────────────────────
@@ -102,22 +144,15 @@ async function cmdStatus(
   cwd: string,
   asJson: boolean
 ): Promise<void> {
-  const projectConfig = await readRawConfig(cwd)
-  const globalConfig = await readRawConfig(homedir())
+  const config = await loadMergedConfigs(cwd)
 
-  const localActive = isPluginActive(projectConfig, cwd)
-  const globalActive = isPluginActive(globalConfig, "")
+  const localActive = isPluginActive(config.project, cwd)
+  const globalActive = isPluginActive(config.global, "")
 
   const mcpServers = await readMcpConfig(cwd)
   const subagents = await readSubagentConfig(cwd)
 
-  const mergedConfig: Record<string, unknown> = {
-    tools: {
-      ...(globalConfig?.tools as Record<string, unknown> || {}),
-      ...(projectConfig?.tools as Record<string, unknown> || {}),
-    },
-  }
-  const disabledPatterns = extractDisabledPatterns(mergedConfig)
+  const disabledPatterns = extractDisabledPatterns(config.tools)
   const mcpNames = mcpServers.map((s) => s.name)
 
   const assigned = calcAssignedMcps(subagents)
@@ -223,30 +258,16 @@ async function cmdList(
   cwd: string,
   asJson: boolean
 ): Promise<void> {
-  const projectConfig = await readRawConfig(cwd)
-  const globalConfig = await readRawConfig(homedir())
-
-  const mergedMcp: Record<string, McpConfigEntry> = {
-    ...(globalConfig?.mcp as Record<string, McpConfigEntry> || {}),
-    ...(projectConfig?.mcp as Record<string, McpConfigEntry> || {}),
-  }
-  const mergedAgent: Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }> = {
-    ...(globalConfig?.agent as Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }> || {}),
-    ...(projectConfig?.agent as Record<string, { mode?: string; description?: string; tools?: Record<string, boolean> }> || {}),
-  }
-  const mergedTools: Record<string, unknown> = {
-    ...(globalConfig?.tools as Record<string, unknown> || {}),
-    ...(projectConfig?.tools as Record<string, unknown> || {}),
-  }
+  const config = await loadMergedConfigs(cwd)
 
   if (asJson) {
-    const servers = Object.entries(mergedMcp).map(([name, entry]) => ({
+    const servers = Object.entries(config.mcp).map(([name, entry]) => ({
       name,
       type: entry.type || "unknown",
       enabled: entry.enabled !== false,
       location: entry.type === "remote" ? entry.url || "" : (entry.command || []).join(" "),
     }))
-    const subagents = Object.entries(mergedAgent)
+    const subagents = Object.entries(config.agent)
       .filter(([, e]) => e.mode !== "primary")
       .map(([name, entry]) => {
         const mcps = entry.tools
@@ -254,7 +275,7 @@ async function cmdList(
           : []
         return { name, mcps, description: entry.description || "" }
       })
-    const disabled = Object.entries(mergedTools).filter(([, v]) => v === false).map(([p]) => p)
+    const disabled = Object.entries(config.tools).filter(([, v]) => v === false).map(([p]) => p)
     console.log(JSON.stringify({ servers, subagents, disabled }, null, 2))
     return
   }
@@ -263,7 +284,7 @@ async function cmdList(
   console.log(BOLD + "MCP Servers" + RESET)
   console.log()
 
-  const entries = Object.entries(mergedMcp)
+  const entries = Object.entries(config.mcp)
   if (entries.length === 0) {
     console.log(DIM + "  No MCP servers configured." + RESET)
   } else {
@@ -292,7 +313,7 @@ async function cmdList(
 
   console.log()
   console.log(BOLD + "Global tool disables" + RESET)
-  const disabled = Object.entries(mergedTools).filter(([, v]) => v === false)
+  const disabled = Object.entries(config.tools).filter(([, v]) => v === false)
   if (disabled.length === 0) {
     console.log(DIM + "  No MCP tools disabled (all loaded in main session)" + RESET)
   } else {
@@ -377,7 +398,8 @@ async function loadCachedTokens(verbose: boolean): Promise<TokenCache[]> {
               })
             }
           } catch {
-            if (verbose) process.stderr.write(` [mcp-auth: ${s.name}]`)
+            // Generic error — don't leak token filenames to stderr
+            if (verbose) process.stderr.write(` [mcp-auth: token read error]`)
           }
         }
       }
@@ -404,11 +426,81 @@ function calcStats(tools: unknown[]): MeasureStats {
   return { tools: tools.length, chars: total, tokensEst: Math.round(total / 4) }
 }
 
-async function measureViaCachedToken(
+/**
+ * MCP initialize + tools/list handshake over HTTP.
+ * Shared by measureViaHttp (remote servers) and measureViaCachedToken (mcp-remote).
+ * Handles both SSE stream and JSON response content types.
+ */
+async function mcpListTools(
+  url: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  name: string,
+  verbose: boolean
+): Promise<unknown[] | null> {
+  const initResp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: "1", method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05", capabilities: {},
+        clientInfo: { name: "scanner", version: "1.0.0" },
+      },
+    }),
+    signal,
+  })
+  if (!initResp.ok) {
+    if (verbose) process.stderr.write(` [${name}: HTTP ${initResp.status}]`)
+    return null
+  }
+  const text = await initResp.text()
+  const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
+    ? parseSse(text)
+    : [JSON.parse(text)]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const initResult = initResults.find((r: any) => r?.result)
+  if (!initResult) {
+    if (verbose) process.stderr.write(` [${name}: no init result]`)
+    return null
+  }
+  const sessionId = initResp.headers.get("Mcp-Session-Id")
+  if (sessionId) headers["Mcp-Session-Id"] = sessionId
+
+  const toolsResp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
+    signal,
+  })
+  if (!toolsResp.ok) {
+    if (verbose) process.stderr.write(` [${name}: tools/list HTTP ${toolsResp.status}]`)
+    return null
+  }
+  const toolsText = await toolsResp.text()
+  const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
+    ? parseSse(toolsText)
+    : [JSON.parse(toolsText)]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const toolsResult = toolsData.find((d: any) => d?.result && !d?.error)
+  if (!toolsResult) {
+    const errData = toolsData.find((d: any) => d?.error)
+    if (errData && verbose) process.stderr.write(` [${name}: ${(errData as any).error.message}]`)
+    return null
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((toolsResult as any)?.result?.tools) || []
+}
+
+/**
+ * Generic HTTP measure wrapper with timeout + AbortController.
+ * Accepts lazy buildHeaders() so callers can construct auth headers per attempt.
+ * Eliminates duplicate init/tools/list code between remote and cached-token paths.
+ */
+async function measureViaHttp(
   name: string,
   url: string,
-  cachedTokens: TokenCache[],
-  envHeaders: Record<string, string> | undefined,
+  buildHeaders: () => Record<string, string> | null,
   verbose: boolean,
   timeoutMs: number
 ): Promise<MeasureStats | null> {
@@ -419,73 +511,44 @@ async function measureViaCachedToken(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    for (const ct of cachedTokens) {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "Authorization": `${ct.type} ${ct.token}`,
-        ...(envHeaders || {}),
-      }
-      try {
-        const initResp = await fetch(url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            jsonrpc: "2.0", id: "1", method: "initialize",
-            params: {
-              protocolVersion: "2024-11-05", capabilities: {},
-              clientInfo: { name: "scanner", version: "1.0.0" },
-            },
-          }),
-          signal: controller.signal,
-        })
-        if (!initResp.ok) {
-          if (verbose) process.stderr.write(` [${name}: HTTP ${initResp.status}]`)
-          continue
-        }
-        const text = await initResp.text()
-        const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
-          ? parseSse(text)
-          : [JSON.parse(text)]
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const initResult = initResults.find((r: any) => r?.result)
-        if (!initResult) {
-          if (verbose) process.stderr.write(` [${name}: no init result]`)
-          continue
-        }
-        const sessionId = initResp.headers.get("Mcp-Session-Id")
-        if (sessionId) headers["Mcp-Session-Id"] = sessionId
-        const toolsResp = await fetch(url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
-          signal: controller.signal,
-        })
-        if (!toolsResp.ok) {
-          if (verbose) process.stderr.write(` [${name}: tools/list HTTP ${toolsResp.status}]`)
-          continue
-        }
-        const toolsText = await toolsResp.text()
-        const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
-          ? parseSse(toolsText)
-          : [JSON.parse(toolsText)]
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolsResult = toolsData.find((d: any) => d?.result && !d?.error)
-        if (!toolsResult) {
-          const errData = toolsData.find((d: any) => d?.error)
-          if (errData && verbose) process.stderr.write(` [${name}: ${(errData as any).error.message}]`)
-          continue
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return calcStats(((toolsResult as any)?.result?.tools) || [])
-      } catch (e: unknown) {
-        if (verbose) process.stderr.write(` [${name}: ${(e as Error).message}]`)
-      }
-    }
+    const headers = buildHeaders()
+    if (!headers) return null
+    const tools = await mcpListTools(url, headers, controller.signal, name, verbose)
+    return tools ? calcStats(tools) : null
+  } catch (e: unknown) {
+    if (verbose) process.stderr.write(` [${name}: ${(e as Error).message}]`)
     return null
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Iterates cached auth tokens against a remote MCP URL.
+ * Falls through tokens silently until one succeeds or all fail.
+ * Delegates actual HTTP handshake to measureViaHttp + mcpListTools.
+ */
+async function measureViaCachedToken(
+  name: string,
+  url: string,
+  cachedTokens: TokenCache[],
+  envHeaders: Record<string, string> | undefined,
+  verbose: boolean,
+  timeoutMs: number
+): Promise<MeasureStats | null> {
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    ...(envHeaders || {}),
+  }
+  for (const ct of cachedTokens) {
+    const result = await measureViaHttp(name, url, () => ({
+      ...baseHeaders,
+      "Authorization": `${ct.type} ${ct.token}`,
+    }), verbose, timeoutMs)
+    if (result !== null) return result
+  }
+  return null
 }
 
 async function measureLocal(
@@ -573,75 +636,12 @@ async function measureRemote(
   timeoutMs: number
 ): Promise<MeasureStats | null> {
   const url = entry.url
-  if (!url || !/^https:\/\//.test(url)) {
-    if (verbose) process.stderr.write(` [${name}: not https]`)
-    return null
-  }
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  const headers: Record<string, string> = {
+  if (!url) return null
+  return measureViaHttp(name, url, () => ({
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
     ...(entry.headers || {}),
-  }
-  try {
-    const initResp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: "1", method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05", capabilities: {},
-          clientInfo: { name: "scanner", version: "1.0.0" },
-        },
-      }),
-      signal: controller.signal,
-    })
-    if (!initResp.ok) {
-      if (verbose) process.stderr.write(` [${name}: HTTP ${initResp.status}]`)
-      return null
-    }
-    const text = await initResp.text()
-    const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
-      ? parseSse(text)
-      : [JSON.parse(text)]
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const initResult = initResults.find((r: any) => r?.result)
-    if (!initResult) {
-      if (verbose) process.stderr.write(` [${name}: no init result]`)
-      return null
-    }
-    const sessionId = initResp.headers.get("Mcp-Session-Id")
-    if (sessionId) headers["Mcp-Session-Id"] = sessionId
-    const toolsResp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
-      signal: controller.signal,
-    })
-    if (!toolsResp.ok) {
-      if (verbose) process.stderr.write(` [${name}: tools HTTP ${toolsResp.status}]`)
-      return null
-    }
-    const toolsText = await toolsResp.text()
-    const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
-      ? parseSse(toolsText)
-      : [JSON.parse(toolsText)]
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const toolsResult = toolsData.find((d: any) => d?.result && !d?.error)
-    if (!toolsResult) {
-      const errData = toolsData.find((d: any) => d?.error)
-      if (errData && verbose) process.stderr.write(` [${name}: ${(errData as any).error.message}]`)
-      return null
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return calcStats(((toolsResult as any)?.result?.tools) || [])
-  } catch (e: unknown) {
-    if (verbose) process.stderr.write(` [${name}: ${(e as Error).message}]`)
-    return null
-  } finally {
-    clearTimeout(timer)
-  }
+  }), verbose, timeoutMs)
 }
 
 async function cmdMeasure(
@@ -650,13 +650,8 @@ async function cmdMeasure(
   verbose: boolean,
   perServerTimeout: number
 ): Promise<void> {
-  const projectConfig = await readRawConfig(cwd)
-  const globalConfig = await readRawConfig(homedir())
-
-  const mcps: Record<string, McpConfigEntry> = {
-    ...(globalConfig?.mcp as Record<string, McpConfigEntry> || {}),
-    ...(projectConfig?.mcp as Record<string, McpConfigEntry> || {}),
-  }
+  const config = await loadMergedConfigs(cwd)
+  const mcps = config.mcp
   const names = Object.keys(mcps)
   const cachedTokens = await loadCachedTokens(verbose)
   const savings: Record<string, MeasureStats> = {}

@@ -69,27 +69,41 @@ function isPluginActive(config, searchPath) {
     return plugins.some((pl) => typeof pl === "string" &&
         (pl.includes(PLUGIN_NAME) || pl === "file:" + searchPath));
 }
-function extractDisabledPatterns(config) {
-    const tools = config.tools || {};
+function extractDisabledPatterns(tools) {
     return Object.entries(tools)
         .filter(([, v]) => v === false)
         .map(([k]) => k);
 }
-// ── Commands ───────────────────────────────────────────────
-async function cmdStatus(cwd, asJson) {
-    const projectConfig = await readRawConfig(cwd);
-    const globalConfig = await readRawConfig(homedir());
-    const localActive = isPluginActive(projectConfig, cwd);
-    const globalActive = isPluginActive(globalConfig, "");
-    const mcpServers = await readMcpConfig(cwd);
-    const subagents = await readSubagentConfig(cwd);
-    const mergedConfig = {
+async function loadMergedConfigs(cwd) {
+    const [project, global] = await Promise.all([
+        readRawConfig(cwd),
+        readRawConfig(homedir()),
+    ]);
+    return {
+        project,
+        global,
+        mcp: {
+            ...(global?.mcp || {}),
+            ...(project?.mcp || {}),
+        },
+        agent: {
+            ...(global?.agent || {}),
+            ...(project?.agent || {}),
+        },
         tools: {
-            ...(globalConfig?.tools || {}),
-            ...(projectConfig?.tools || {}),
+            ...(global?.tools || {}),
+            ...(project?.tools || {}),
         },
     };
-    const disabledPatterns = extractDisabledPatterns(mergedConfig);
+}
+// ── Commands ───────────────────────────────────────────────
+async function cmdStatus(cwd, asJson) {
+    const config = await loadMergedConfigs(cwd);
+    const localActive = isPluginActive(config.project, cwd);
+    const globalActive = isPluginActive(config.global, "");
+    const mcpServers = await readMcpConfig(cwd);
+    const subagents = await readSubagentConfig(cwd);
+    const disabledPatterns = extractDisabledPatterns(config.tools);
     const mcpNames = mcpServers.map((s) => s.name);
     const assigned = calcAssignedMcps(subagents);
     const hidden = mcpNames.filter((n) => disabledPatterns.some((p) => p === `${n}_*`));
@@ -178,28 +192,15 @@ async function cmdStatus(cwd, asJson) {
     console.log();
 }
 async function cmdList(cwd, asJson) {
-    const projectConfig = await readRawConfig(cwd);
-    const globalConfig = await readRawConfig(homedir());
-    const mergedMcp = {
-        ...(globalConfig?.mcp || {}),
-        ...(projectConfig?.mcp || {}),
-    };
-    const mergedAgent = {
-        ...(globalConfig?.agent || {}),
-        ...(projectConfig?.agent || {}),
-    };
-    const mergedTools = {
-        ...(globalConfig?.tools || {}),
-        ...(projectConfig?.tools || {}),
-    };
+    const config = await loadMergedConfigs(cwd);
     if (asJson) {
-        const servers = Object.entries(mergedMcp).map(([name, entry]) => ({
+        const servers = Object.entries(config.mcp).map(([name, entry]) => ({
             name,
             type: entry.type || "unknown",
             enabled: entry.enabled !== false,
             location: entry.type === "remote" ? entry.url || "" : (entry.command || []).join(" "),
         }));
-        const subagents = Object.entries(mergedAgent)
+        const subagents = Object.entries(config.agent)
             .filter(([, e]) => e.mode !== "primary")
             .map(([name, entry]) => {
             const mcps = entry.tools
@@ -207,14 +208,14 @@ async function cmdList(cwd, asJson) {
                 : [];
             return { name, mcps, description: entry.description || "" };
         });
-        const disabled = Object.entries(mergedTools).filter(([, v]) => v === false).map(([p]) => p);
+        const disabled = Object.entries(config.tools).filter(([, v]) => v === false).map(([p]) => p);
         console.log(JSON.stringify({ servers, subagents, disabled }, null, 2));
         return;
     }
     console.log();
     console.log(BOLD + "MCP Servers" + RESET);
     console.log();
-    const entries = Object.entries(mergedMcp);
+    const entries = Object.entries(config.mcp);
     if (entries.length === 0) {
         console.log(DIM + "  No MCP servers configured." + RESET);
     }
@@ -242,7 +243,7 @@ async function cmdList(cwd, asJson) {
     }
     console.log();
     console.log(BOLD + "Global tool disables" + RESET);
-    const disabled = Object.entries(mergedTools).filter(([, v]) => v === false);
+    const disabled = Object.entries(config.tools).filter(([, v]) => v === false);
     if (disabled.length === 0) {
         console.log(DIM + "  No MCP tools disabled (all loaded in main session)" + RESET);
     }
@@ -317,7 +318,7 @@ async function loadCachedTokens(verbose) {
                     }
                     catch {
                         if (verbose)
-                            process.stderr.write(` [mcp-auth: ${s.name}]`);
+                            process.stderr.write(` [mcp-auth: token read error]`);
                     }
                 }
             }
@@ -347,7 +348,65 @@ function calcStats(tools) {
         total += JSON.stringify(t).length;
     return { tools: tools.length, chars: total, tokensEst: Math.round(total / 4) };
 }
-async function measureViaCachedToken(name, url, cachedTokens, envHeaders, verbose, timeoutMs) {
+async function mcpListTools(url, headers, signal, name, verbose) {
+    const initResp = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+            jsonrpc: "2.0", id: "1", method: "initialize",
+            params: {
+                protocolVersion: "2024-11-05", capabilities: {},
+                clientInfo: { name: "scanner", version: "1.0.0" },
+            },
+        }),
+        signal,
+    });
+    if (!initResp.ok) {
+        if (verbose)
+            process.stderr.write(` [${name}: HTTP ${initResp.status}]`);
+        return null;
+    }
+    const text = await initResp.text();
+    const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
+        ? parseSse(text)
+        : [JSON.parse(text)];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const initResult = initResults.find((r) => r?.result);
+    if (!initResult) {
+        if (verbose)
+            process.stderr.write(` [${name}: no init result]`);
+        return null;
+    }
+    const sessionId = initResp.headers.get("Mcp-Session-Id");
+    if (sessionId)
+        headers["Mcp-Session-Id"] = sessionId;
+    const toolsResp = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
+        signal,
+    });
+    if (!toolsResp.ok) {
+        if (verbose)
+            process.stderr.write(` [${name}: tools/list HTTP ${toolsResp.status}]`);
+        return null;
+    }
+    const toolsText = await toolsResp.text();
+    const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
+        ? parseSse(toolsText)
+        : [JSON.parse(toolsText)];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolsResult = toolsData.find((d) => d?.result && !d?.error);
+    if (!toolsResult) {
+        const errData = toolsData.find((d) => d?.error);
+        if (errData && verbose)
+            process.stderr.write(` [${name}: ${errData.error.message}]`);
+        return null;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (toolsResult?.result?.tools) || [];
+}
+async function measureViaHttp(name, url, buildHeaders, verbose, timeoutMs) {
     if (!/^https:\/\//.test(url)) {
         if (verbose)
             process.stderr.write(` [${name}: not https]`);
@@ -356,81 +415,36 @@ async function measureViaCachedToken(name, url, cachedTokens, envHeaders, verbos
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        for (const ct of cachedTokens) {
-            const headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Authorization": `${ct.type} ${ct.token}`,
-                ...(envHeaders || {}),
-            };
-            try {
-                const initResp = await fetch(url, {
-                    method: "POST",
-                    headers,
-                    body: JSON.stringify({
-                        jsonrpc: "2.0", id: "1", method: "initialize",
-                        params: {
-                            protocolVersion: "2024-11-05", capabilities: {},
-                            clientInfo: { name: "scanner", version: "1.0.0" },
-                        },
-                    }),
-                    signal: controller.signal,
-                });
-                if (!initResp.ok) {
-                    if (verbose)
-                        process.stderr.write(` [${name}: HTTP ${initResp.status}]`);
-                    continue;
-                }
-                const text = await initResp.text();
-                const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
-                    ? parseSse(text)
-                    : [JSON.parse(text)];
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const initResult = initResults.find((r) => r?.result);
-                if (!initResult) {
-                    if (verbose)
-                        process.stderr.write(` [${name}: no init result]`);
-                    continue;
-                }
-                const sessionId = initResp.headers.get("Mcp-Session-Id");
-                if (sessionId)
-                    headers["Mcp-Session-Id"] = sessionId;
-                const toolsResp = await fetch(url, {
-                    method: "POST",
-                    headers,
-                    body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
-                    signal: controller.signal,
-                });
-                if (!toolsResp.ok) {
-                    if (verbose)
-                        process.stderr.write(` [${name}: tools/list HTTP ${toolsResp.status}]`);
-                    continue;
-                }
-                const toolsText = await toolsResp.text();
-                const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
-                    ? parseSse(toolsText)
-                    : [JSON.parse(toolsText)];
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const toolsResult = toolsData.find((d) => d?.result && !d?.error);
-                if (!toolsResult) {
-                    const errData = toolsData.find((d) => d?.error);
-                    if (errData && verbose)
-                        process.stderr.write(` [${name}: ${errData.error.message}]`);
-                    continue;
-                }
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                return calcStats((toolsResult?.result?.tools) || []);
-            }
-            catch (e) {
-                if (verbose)
-                    process.stderr.write(` [${name}: ${e.message}]`);
-            }
-        }
+        const headers = buildHeaders();
+        if (!headers)
+            return null;
+        const tools = await mcpListTools(url, headers, controller.signal, name, verbose);
+        return tools ? calcStats(tools) : null;
+    }
+    catch (e) {
+        if (verbose)
+            process.stderr.write(` [${name}: ${e.message}]`);
         return null;
     }
     finally {
         clearTimeout(timer);
     }
+}
+async function measureViaCachedToken(name, url, cachedTokens, envHeaders, verbose, timeoutMs) {
+    const baseHeaders = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        ...(envHeaders || {}),
+    };
+    for (const ct of cachedTokens) {
+        const result = await measureViaHttp(name, url, () => ({
+            ...baseHeaders,
+            "Authorization": `${ct.type} ${ct.token}`,
+        }), verbose, timeoutMs);
+        if (result !== null)
+            return result;
+    }
+    return null;
 }
 async function measureLocal(name, entry, verbose, timeoutMs) {
     const cmdParts = entry.command || [];
@@ -537,92 +551,17 @@ async function measureLocal(name, entry, verbose, timeoutMs) {
 }
 async function measureRemote(name, entry, verbose, timeoutMs) {
     const url = entry.url;
-    if (!url || !/^https:\/\//.test(url)) {
-        if (verbose)
-            process.stderr.write(` [${name}: not https]`);
+    if (!url)
         return null;
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const headers = {
+    return measureViaHttp(name, url, () => ({
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         ...(entry.headers || {}),
-    };
-    try {
-        const initResp = await fetch(url, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-                jsonrpc: "2.0", id: "1", method: "initialize",
-                params: {
-                    protocolVersion: "2024-11-05", capabilities: {},
-                    clientInfo: { name: "scanner", version: "1.0.0" },
-                },
-            }),
-            signal: controller.signal,
-        });
-        if (!initResp.ok) {
-            if (verbose)
-                process.stderr.write(` [${name}: HTTP ${initResp.status}]`);
-            return null;
-        }
-        const text = await initResp.text();
-        const initResults = (initResp.headers.get("content-type") || "").includes("text/event-stream")
-            ? parseSse(text)
-            : [JSON.parse(text)];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const initResult = initResults.find((r) => r?.result);
-        if (!initResult) {
-            if (verbose)
-                process.stderr.write(` [${name}: no init result]`);
-            return null;
-        }
-        const sessionId = initResp.headers.get("Mcp-Session-Id");
-        if (sessionId)
-            headers["Mcp-Session-Id"] = sessionId;
-        const toolsResp = await fetch(url, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" }),
-            signal: controller.signal,
-        });
-        if (!toolsResp.ok) {
-            if (verbose)
-                process.stderr.write(` [${name}: tools HTTP ${toolsResp.status}]`);
-            return null;
-        }
-        const toolsText = await toolsResp.text();
-        const toolsData = (toolsResp.headers.get("content-type") || "").includes("text/event-stream")
-            ? parseSse(toolsText)
-            : [JSON.parse(toolsText)];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolsResult = toolsData.find((d) => d?.result && !d?.error);
-        if (!toolsResult) {
-            const errData = toolsData.find((d) => d?.error);
-            if (errData && verbose)
-                process.stderr.write(` [${name}: ${errData.error.message}]`);
-            return null;
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return calcStats((toolsResult?.result?.tools) || []);
-    }
-    catch (e) {
-        if (verbose)
-            process.stderr.write(` [${name}: ${e.message}]`);
-        return null;
-    }
-    finally {
-        clearTimeout(timer);
-    }
+    }), verbose, timeoutMs);
 }
 async function cmdMeasure(cwd, asJson, verbose, perServerTimeout) {
-    const projectConfig = await readRawConfig(cwd);
-    const globalConfig = await readRawConfig(homedir());
-    const mcps = {
-        ...(globalConfig?.mcp || {}),
-        ...(projectConfig?.mcp || {}),
-    };
+    const config = await loadMergedConfigs(cwd);
+    const mcps = config.mcp;
     const names = Object.keys(mcps);
     const cachedTokens = await loadCachedTokens(verbose);
     const savings = {};

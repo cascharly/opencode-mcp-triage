@@ -330,7 +330,7 @@ export const server: Plugin = async ({ directory, client }) => {
                 ? `  ${match.subagent.description}`
                 : "",
               mcps ? `  MCP: ${mcps}` : "",
-              `  Matched by: ${match.matchedBy}`,
+              `  Matched by: ${match.matchedBy.join(", ")}`,
               "",
               `Invoke with @${match.subagent.name} in your message, or use the Task tool:`,
               `  task({ subagent_type: "${match.subagent.name}", prompt: "..." })`,
@@ -452,27 +452,38 @@ export const server: Plugin = async ({ directory, client }) => {
      *
      * Detects patterns that suggest MCP-related work and appends
      * a hint to use triage_mcp for routing.
+     *
+     * Guards:
+     * - typeof check prevents crash on unexpected output types
+     * - text.includes dedup prevents same hint being appended repeatedly
+     * - try/catch handles frozen/read-only output objects
      */
     async "tool.execute.after"(_input, output) {
-      if (output.output === undefined) return
+      if (!output || typeof output.output !== "string") return
 
       const text = output.output
       const hints: string[] = []
 
-      if (text.includes("CONFLICT") || text.includes("merge conflict")) {
+      if ((text.includes("CONFLICT") || text.includes("merge conflict")) && !text.includes("[Hint] Merge conflict")) {
         hints.push("[Hint] Merge conflicts detected. Use triage_mcp with 'git' to find the right subagent.")
       }
 
       if (/\brg\b/.test(text) || /\bgrep\b/.test(text)) {
-        hints.push("[Hint] For code search, try triage_mcp with 'search code' to route to a code-aware subagent.")
+        if (!text.includes("[Hint] For code search")) {
+          hints.push("[Hint] For code search, try triage_mcp with 'search code' to route to a code-aware subagent.")
+        }
       }
 
-      if (text.includes("ERR!") && (text.includes("npm") || text.includes("npx"))) {
+      if (text.includes("ERR!") && (text.includes("npm") || text.includes("npx")) && !text.includes("[Hint] Package error")) {
         hints.push("[Hint] Package error detected. Use triage_mcp with 'package' or 'npm' for routing.")
       }
 
       if (hints.length > 0) {
-        output.output = text + "\n\n" + hints.join("\n")
+        try {
+          output.output = text + "\n\n" + hints.join("\n")
+        } catch {
+          // output may be read-only — skip
+        }
       }
     },
 
@@ -481,8 +492,13 @@ export const server: Plugin = async ({ directory, client }) => {
      *
      * Adds a compact summary of available MCP subagents so the AI knows
      * about routing without needing to call triage_mcp first.
+     *
+     * Guard: output.system must exist and be an array (handles undefined,
+     * null, or non-array values that would crash on .push()).
      */
     async "experimental.chat.system.transform"(_input, output) {
+      if (!output?.system || !Array.isArray(output.system)) return
+
       const mcpServers = await getCachedMcpServers()
       const subagents = await getCachedSubagents()
 

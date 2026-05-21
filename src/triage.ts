@@ -2,7 +2,7 @@
  * Keyword-based subagent scoring engine.
  *
  * Scoring strategy (no LLM, pure text matching):
- * 1. Split query into words (min 3 chars, strip punctuation)
+ * 1. Split query into words (min 2 chars, strip punctuation)
  * 2. For each subagent, score against name, description, and MCP server names
  * 3. Word boundary match > substring match (15 vs 10 base points)
  * 4. Name and MCP matches weighted 3x, description weighted 1x
@@ -22,14 +22,20 @@ import { escapeRegex } from "./utils.js"
 /** Minimum score gap between top two candidates for confident routing */
 export const THRESHOLD = 30
 /** Words shorter than this are ignored (too generic) */
-const MIN_WORD_LENGTH = 3
+const MIN_WORD_LENGTH = 2
 /** Multiplier for name and MCP server matches */
 const NAME_WEIGHT = 3
 /** Multiplier for description matches (lower — more noise) */
 const DESC_WEIGHT = 1
 
+const wordRegexCache = new Map<string, RegExp>()
+
 function getWordBonus(word: string, target: string): number {
-  const re = new RegExp(`\\b${escapeRegex(word)}\\b`, "i")
+  let re = wordRegexCache.get(word)
+  if (!re) {
+    re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegex(word)}(?![\\p{L}\\p{N}])`, "iu")
+    wordRegexCache.set(word, re)
+  }
   if (re.test(target)) return 15
   if (target.includes(word)) return 10
   return 0
@@ -46,18 +52,20 @@ function getWordBonus(word: string, target: string): number {
  * Uses a Set for matchedBy to avoid duplicate entries when multiple
  * query words match the same MCP server.
  *
- * Returns all subagents with their scores — caller filters by score > 0.
+ * Returns only subagents with score > 0.
  */
 export function scoreSubagents(
   query: string,
   subagents: Subagent[]
 ): ScoredSubagent[] {
-  // Normalize query: lowercase, split on whitespace, strip punctuation, filter short words
-  const words = query
-    .toLowerCase()
-    .split(/\s+/)
-    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter((w) => w.length >= MIN_WORD_LENGTH)
+  // Normalize query: lowercase, split on whitespace/punctuation, dedupe, strip punctuation, filter short words
+  const words = [...new Set(
+    query
+      .toLowerCase()
+      .split(/[\s\p{P}]+/u)
+      .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+      .filter((w) => w.length >= MIN_WORD_LENGTH)
+  )]
 
   if (words.length === 0) return []
 
@@ -94,11 +102,12 @@ export function scoreSubagents(
         const bonus = getWordBonus(word, mcpName)
         if (bonus > 0) {
           score += NAME_WEIGHT * bonus
-          matched.add(`mcp:${mcpName}`)
+          matched.add(`mcp:${mcpName}:${word}`)
         }
       }
     }
 
-    return { subagent, score, matchedBy: Array.from(matched).join(", ") }
-  })
+    return { subagent, score, matchedBy: Array.from(matched) }
+    })
+    .filter((s) => s.score > 0)
 }

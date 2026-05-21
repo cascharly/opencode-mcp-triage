@@ -1,1 +1,1 @@
-export { server } from "../../src/index.js"
+export { server } from "../../src/index.ts"

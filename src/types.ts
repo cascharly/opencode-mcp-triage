@@ -54,10 +54,10 @@ export interface Subagent {
  * Subagent enriched with a relevance score from triage matching.
  *
  * score: cumulative points from keyword matches across name, description, and MCP names
- * matchedBy: human-readable explanation of which fields matched which keywords
+ * matchedBy: structured array of match explanations (e.g., "name:github", "mcp:supabase:database")
  */
 export interface ScoredSubagent {
   subagent: Subagent
   score: number
-  matchedBy: string
+  matchedBy: string[]
 }
