@@ -65,6 +65,8 @@ interface Cache<T> {
   get(): T | null
   set(value: T): void
   invalidate(): void
+  /** Returns remaining TTL in ms, or 0 if expired/empty */
+  remainingTtl(): number
 }
 
 function createCache<T>(ttlMs: number): Cache<T> {
@@ -82,6 +84,11 @@ function createCache<T>(ttlMs: number): Cache<T> {
     },
     invalidate() {
       entry = null
+    },
+    remainingTtl(): number {
+      if (!entry) return 0
+      const remaining = entry.expiresAt - Date.now()
+      return remaining > 0 ? remaining : 0
     },
   }
 }
@@ -439,12 +446,17 @@ export const server: Plugin = async ({ directory, client }) => {
     },
 
     /**
-     * Cache warming: pre-fetch config on every user message.
+     * Cache warming: pre-fetch config on user message when cache near expiry.
+     * Skips if TTL > 1s remaining to avoid unnecessary I/O.
      * Ensures triage tool has fresh data without waiting for first call.
      */
     async "chat.message"() {
-      getCachedMcpServers().catch(() => {})
-      getCachedSubagents().catch(() => {})
+      if (mcpCache.remainingTtl() < 1000) {
+        getCachedMcpServers().catch(() => {})
+      }
+      if (subagentCache.remainingTtl() < 1000) {
+        getCachedSubagents().catch(() => {})
+      }
     },
 
     /**
@@ -480,6 +492,8 @@ export const server: Plugin = async ({ directory, client }) => {
 
       if (hints.length > 0) {
         try {
+          const existingHints = text.match(/\[Hint\]/g)
+          if (existingHints && existingHints.length >= 3) return
           output.output = text + "\n\n" + hints.join("\n")
         } catch {
           // output may be read-only — skip

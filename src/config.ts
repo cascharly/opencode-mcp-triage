@@ -142,7 +142,8 @@ export async function readSubagentConfig(
  * It works for typical opencode.jsonc files but could fail on edge cases
  * like // inside strings. For production use, consider a proper JSONC library.
  */
-function stripJsonc(raw: string): string {
+/** @internal exported for testing */
+export function stripJsonc(raw: string): string {
   let result = ""
   let inString = false
   let escape = false

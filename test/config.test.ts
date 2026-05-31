@@ -11,69 +11,8 @@
  */
 
 import { describe, it, expect } from "vitest"
-
-// We need to test the internal stripJsonc function.
-// Since it's not exported, we'll replicate it here for testing.
-function stripJsonc(raw: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-
-  while (i < raw.length) {
-    const ch = raw[i]
-
-    if (inString) {
-      result += ch
-      if (escape) {
-        escape = false
-      } else if (ch === "\\") {
-        escape = true
-      } else if (ch === '"') {
-        inString = false
-      }
-      i++
-      continue
-    }
-
-    // Block comment
-    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "*") {
-      i += 2
-      while (i < raw.length) {
-        if (raw[i] === "*" && i + 1 < raw.length && raw[i + 1] === "/") {
-          i += 2
-          break
-        }
-        i++
-      }
-      continue
-    }
-
-    // Line comment
-    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
-      i += 2
-      while (i < raw.length && raw[i] !== "\n") {
-        i++
-      }
-      continue
-    }
-
-    if (ch === '"') {
-      inString = true
-    }
-
-    result += ch
-    i++
-  }
-
-  result = result.replace(/,(?=\s*[}\]])/g, "")
-  return result
-}
-
-function stripBOM(s: string): string {
-  if (s.charCodeAt(0) === 0xfeff) return s.slice(1)
-  return s
-}
+import { stripJsonc } from "../src/config.js"
+import { stripBOM } from "../src/utils.js"
 
 describe("stripBOM", () => {
   it("removes UTF-8 BOM", () => {

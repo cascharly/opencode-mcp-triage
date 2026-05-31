@@ -27,6 +27,8 @@ const MIN_WORD_LENGTH = 2
 const NAME_WEIGHT = 3
 /** Multiplier for description matches (lower — more noise) */
 const DESC_WEIGHT = 1
+/** Max entries in wordRegexCache to prevent memory leak */
+const CACHE_MAX_SIZE = 100
 
 const wordRegexCache = new Map<string, RegExp>()
 
@@ -34,6 +36,10 @@ function getWordBonus(word: string, target: string): number {
   let re = wordRegexCache.get(word)
   if (!re) {
     re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegex(word)}(?![\\p{L}\\p{N}])`, "iu")
+    if (wordRegexCache.size >= CACHE_MAX_SIZE) {
+      const first = wordRegexCache.keys().next().value
+      if (first !== undefined) wordRegexCache.delete(first)
+    }
     wordRegexCache.set(word, re)
   }
   if (re.test(target)) return 15

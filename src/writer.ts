@@ -88,7 +88,8 @@ export async function ensureToolsDisabled(
   if (toolsMatch) {
     // "tools" block exists — insert entries after opening brace
     // Map position from stripped string back to original (comments shift positions)
-    const insertPos = mapStrippedPosition(raw, stripped, toolsMatch.index! + toolsMatch[0].length)
+    if (toolsMatch.index === undefined) return false
+    const insertPos = mapStrippedPosition(raw, stripped, toolsMatch.index + toolsMatch[0].length)
     const prefix = raw.slice(0, insertPos)
     const suffix = raw.slice(insertPos)
 
@@ -214,9 +215,10 @@ export async function ensureSubagentsCreated(
   let modified: string
 
   if (agentMatch) {
+    if (agentMatch.index === undefined) return 0
     const insertPos = mapStrippedPosition(
       raw, stripped,
-      agentMatch.index! + agentMatch[0].length
+      agentMatch.index + agentMatch[0].length
     )
     const prefix = raw.slice(0, insertPos)
     const suffix = raw.slice(insertPos)
@@ -347,7 +349,8 @@ async function findProjectConfigPath(
  *
  * O(n) where n is the original string length.
  */
-function mapStrippedPosition(original: string, stripped: string, strippedPos: number): number {
+/** @internal exported for testing */
+export function mapStrippedPosition(original: string, stripped: string, strippedPos: number): number {
   let origIdx = 0
   let strippedIdx = 0
   while (strippedIdx < strippedPos && origIdx < original.length) {
@@ -365,17 +368,63 @@ function mapStrippedPosition(original: string, stripped: string, strippedPos: nu
  * Handles:
  * - Block comments: /* ... * /
  * - Line comments: // ... (negative lookbehind (?<!:) avoids matching :// in URLs)
+ * - String awareness: // inside quoted strings is NOT treated as comment
  *
  * Does NOT handle trailing commas — that's handled separately in stripJsonc().
  * This version is simpler because we only need it for regex matching, not parsing.
  */
-function stripJsonComments(raw: string): string {
+/** @internal exported for testing */
+export function stripJsonComments(raw: string): string {
   let result = raw.replace(/\/\*[\s\S]*?\*\//g, "")
-  result = result.replace(/(?<!:)\/\/.*$/gm, "")
+  result = stripLineComments(result)
   return result
 }
 
-function jsonEscape(s: string): string {
+function stripLineComments(raw: string): string {
+  let result = ""
+  let inString = false
+  let escape = false
+  let i = 0
+
+  while (i < raw.length) {
+    const ch = raw[i]
+
+    if (inString) {
+      result += ch
+      if (escape) {
+        escape = false
+      } else if (ch === "\\") {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      i++
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      result += ch
+      i++
+      continue
+    }
+
+    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
+      while (i < raw.length && raw[i] !== "\n") {
+        i++
+      }
+      continue
+    }
+
+    result += ch
+    i++
+  }
+
+  return result
+}
+
+/** @internal exported for testing */
+export function jsonEscape(s: string): string {
   return s
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
@@ -398,7 +447,8 @@ function jsonEscape(s: string): string {
  * IMPORTANT: Input should be comment-stripped. Comments can contain
  * braces that would throw off the depth counter.
  */
-function findClosingRootBrace(raw: string): number {
+/** @internal exported for testing */
+export function findClosingRootBrace(raw: string): number {
   let depth = 0
   let inString = false
 

@@ -24,10 +24,11 @@ export function stripBOM(s: string): string {
 /**
  * Validates a file path against path traversal attacks.
  * Rejects paths containing null bytes or .. path segments.
+ * Handles both / and \ path separators on Windows.
  */
 export function validatePath(path: string): boolean {
   if (path.includes("\0")) return false
-  const segments = path.split(sep)
+  const segments = path.split(/[\\/]/)
   if (segments.includes("..")) return false
   return true
 }
@@ -60,4 +61,41 @@ export function calcAssignedMcps(subagents: { mcpServers: string[] }[]): Set<str
     }
   }
   return assigned
+}
+
+/**
+ * Levenshtein distance between two strings.
+ * Used for CLI typo correction.
+ */
+export function levenshtein(a: string, b: string): number {
+  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i])
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      const cost = b[i - 1] === a[j - 1] ? 0 : 1
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      )
+    }
+  }
+  return matrix[b.length][a.length]
+}
+
+/**
+ * Suggests a correction for a misspelled command.
+ * Uses Levenshtein distance with threshold of 3.
+ */
+export function suggestCommand(typo: string, validCommands: string[]): string | null {
+  let best: string | null = null
+  let bestDist = Infinity
+  for (const cmd of validCommands) {
+    const dist = levenshtein(typo, cmd)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = cmd
+    }
+  }
+  return bestDist <= 3 ? best : null
 }

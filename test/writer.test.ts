@@ -9,76 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-
-/**
- * Strips JSONC comments from a raw JSON string.
- */
-function stripJsonComments(raw: string): string {
-  let result = raw.replace(/\/\*[\s\S]*?\*\//g, "")
-  result = result.replace(/(?<!:)\/\/.*$/gm, "")
-  return result
-}
-
-/**
- * Maps a character position from a stripped string back to the original.
- */
-function mapStrippedPosition(original: string, stripped: string, strippedPos: number): number {
-  let origIdx = 0
-  let strippedIdx = 0
-  while (strippedIdx < strippedPos && origIdx < original.length) {
-    if (original[origIdx] === stripped[strippedIdx]) {
-      strippedIdx++
-    }
-    origIdx++
-  }
-  return origIdx
-}
-
-/**
- * Finds the position of the closing brace of the root JSON object.
- */
-function findClosingRootBrace(raw: string): number {
-  let depth = 0
-  let inString = false
-
-  for (let i = raw.length - 1; i >= 0; i--) {
-    const ch = raw[i]
-
-    if (inString) {
-      if (ch === '"') {
-        let backslashCount = 0
-        let j = i - 1
-        while (j >= 0 && raw[j] === "\\") {
-          backslashCount++
-          j--
-        }
-        if (backslashCount % 2 === 0) inString = false
-      }
-      continue
-    }
-
-    if (ch === '"') {
-      inString = true
-      continue
-    }
-
-    if (ch === "}") depth++
-    if (ch === "{") depth--
-
-    if (depth === 1 && ch === "}") return i
-  }
-
-  return -1
-}
-
-function jsonEscape(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t")
-}
+import { stripJsonComments, mapStrippedPosition, findClosingRootBrace, jsonEscape } from "../src/writer.js"
 
 describe("mapStrippedPosition", () => {
   it("maps position when no comments exist", () => {

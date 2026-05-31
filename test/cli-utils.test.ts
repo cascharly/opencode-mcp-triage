@@ -3,42 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-
-/**
- * Levenshtein distance between two strings.
- */
-function levenshtein(a: string, b: string): number {
-  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i])
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j
-
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      const cost = b[i - 1] === a[j - 1] ? 0 : 1
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      )
-    }
-  }
-  return matrix[b.length][a.length]
-}
-
-/**
- * Suggests a correction for a misspelled command.
- */
-function suggestCommand(typo: string, validCommands: string[]): string | null {
-  let best: string | null = null
-  let bestDist = Infinity
-  for (const cmd of validCommands) {
-    const dist = levenshtein(typo, cmd)
-    if (dist < bestDist) {
-      bestDist = dist
-      best = cmd
-    }
-  }
-  return bestDist <= 3 ? best : null
-}
+import { levenshtein, suggestCommand } from "../src/utils.js"
 
 describe("levenshtein", () => {
   it("returns 0 for identical strings", () => {

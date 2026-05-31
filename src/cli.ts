@@ -17,6 +17,7 @@ import { readRawConfig, findConfigPath } from "./config.js"
 import { readMcpConfig, readSubagentConfig } from "./config.js"
 import type { McpConfigEntry } from "./types.js"
 import { calcAssignedMcps } from "./utils.js"
+import { levenshtein, suggestCommand } from "./utils.js"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
@@ -39,37 +40,6 @@ const CYAN = "\x1b[36m"
 const RESET = "\x1b[0m"
 const BOLD = "\x1b[1m"
 const DIM = "\x1b[2m"
-
-// ── Typo correction ────────────────────────────────────────
-
-function levenshtein(a: string, b: string): number {
-  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i])
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      const cost = b[i - 1] === a[j - 1] ? 0 : 1
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      )
-    }
-  }
-  return matrix[b.length][a.length]
-}
-
-function suggestCommand(typo: string, validCommands: string[]): string | null {
-  let best: string | null = null
-  let bestDist = Infinity
-  for (const cmd of validCommands) {
-    const dist = levenshtein(typo, cmd)
-    if (dist < bestDist) {
-      bestDist = dist
-      best = cmd
-    }
-  }
-  return bestDist <= 3 ? best : null
-}
 
 // ── Config helpers ─────────────────────────────────────────
 
@@ -196,12 +166,12 @@ async function cmdStatus(
   }
 
   const scopeSummary: string[] = []
-  if (localActive) scopeSummary.push(GREEN + "●" + RESET + " local")
-  if (globalActive) scopeSummary.push(GREEN + "●" + RESET + " global")
+  if (localActive) scopeSummary.push(GREEN + "●" + RESET + DIM + " local" + RESET)
+  if (globalActive) scopeSummary.push(GREEN + "●" + RESET + DIM + " global" + RESET)
   if (!localActive && !globalActive) scopeSummary.push(DIM + "○ inactive" + RESET)
 
   console.log()
-  console.log(BOLD + "● MCP Triage Status" + RESET + DIM + " — " + scopeSummary.join(" · ") + RESET)
+  console.log(BOLD + "● MCP Triage Status" + RESET + DIM + " — " + scopeSummary.join(DIM + " · " + RESET + DIM) + RESET)
   console.log()
   console.log(`  ${DIM}MCP servers:${RESET} ${mcpNames.length}  │  ${DIM}Subagents:${RESET} ${subagents.length}  │  ${DIM}Assigned:${RESET} ${assigned.size}/${mcpNames.length}`)
   console.log()
