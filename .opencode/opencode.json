@@ -1,13 +1,19 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "opencode-triage",
+      {
+        "autoHide": true
+      }
+    ]
+  ],
   "tools": {
-    "iol-inversiones_*": false,
     "supabase_*": false,
     "netlify_*": false,
     "render_*": false,
     "clickup_*": false,
-    "context7_*": false,
-    "github_*": false
-  },
-  "plugin": ["opencode-mcp-triage"]
+    "github_*": false,
+    "iol-inversiones_*": false
+  }
 }
