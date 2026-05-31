@@ -6,8 +6,7 @@
     "netlify_*": false,
     "render_*": false,
     "clickup_*": false,
-    "context7_*": false,
-    "github_*": false
+    "context7_*": false
   },
   "plugin": ["opencode-mcp-triage"]
 }
