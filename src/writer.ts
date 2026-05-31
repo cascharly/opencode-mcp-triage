@@ -273,9 +273,66 @@ export async function ensureSubagentsCreated(
   await writeLock(directory, {
     version: 1,
     autoCreated: newAutoCreated,
+    enabled: lock?.enabled,
   })
 
   return toCreate.length
+}
+
+/**
+ * Removes all "servername_*": false disable entries from config.
+ * Reverse of ensureToolsDisabled. Restores MCP tools to main session.
+ *
+ * Uses regex on raw string since entries follow predictable format
+ * (written by ensureToolsDisabled). Cleans up trailing commas and
+ * empty tools blocks after removal.
+ *
+ * @returns true if file was modified
+ */
+export async function removeToolsDisable(
+  directory: string,
+  mcpNames: string[]
+): Promise<boolean> {
+  if (mcpNames.length === 0) return false
+
+  const resolved = await findProjectConfigPath(directory)
+  if (!resolved || !resolved.exists) return false
+
+  let raw: string
+  try {
+    raw = await readFile(resolved.path, "utf-8")
+    if (raw.length > MAX_CONFIG_SIZE) return false
+  } catch {
+    return false
+  }
+
+  raw = stripBOM(raw)
+  let modified = raw
+
+  for (const name of mcpNames) {
+    const escaped = escapeRegex(name)
+    const re = new RegExp(
+      `(,\\s*)?\\r?\\n\\s*\\"${escaped}_\\*\\"\\s*\\:\\s*false`,
+      "g"
+    )
+    modified = modified.replace(re, "")
+  }
+
+  if (modified === raw) return false
+
+  modified = modified.replace(/,\s*(\r?\n\s*")/g, "$1")
+  modified = modified.replace(/,\s*(\n\s*[\}\]])/g, "$1")
+  modified = modified.replace(/"tools"\s*:\s*\{\s*(\n\s*)?\}/g, "")
+  modified = modified.replace(/,\s*([}\]])/g, "$1")
+
+  try {
+    JSON.parse(stripJsonComments(modified))
+  } catch {
+    return false
+  }
+
+  await safeWriteFile(resolved.path, modified)
+  return true
 }
 
 /**

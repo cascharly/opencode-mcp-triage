@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { ensureToolsDisabled, ensureSubagentsCreated } from "../src/writer.js"
+import { ensureToolsDisabled, ensureSubagentsCreated, removeToolsDisable } from "../src/writer.js"
+import { isTriageEnabled, toggleTriage, readLock } from "../src/lock.js"
 
 function makeConfig(dir: string, content: string): void {
   const cfgDir = join(dir, ".opencode")
@@ -101,5 +102,71 @@ describe("ensureSubagentsCreated", () => {
     makeConfig(tmpDir, "{}")
     const count = await ensureSubagentsCreated(tmpDir, [], [])
     expect(count).toBe(0)
+  })
+})
+
+describe("removeToolsDisable", () => {
+  it("removes disable entries from tools block", async () => {
+    makeConfig(tmpDir, `{
+  "tools": {
+    "github_*": false,
+    "supabase_*": false
+  }
+}`)
+    const result = await removeToolsDisable(tmpDir, ["github"])
+    expect(result).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"github_*"')
+    expect(raw).toContain('"supabase_*"')
+  })
+
+  it("removes entire tools block when last entry removed", async () => {
+    makeConfig(tmpDir, `{
+  "tools": {
+    "github_*": false
+  }
+}`)
+    const result = await removeToolsDisable(tmpDir, ["github"])
+    expect(result).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain("tools")
+  })
+
+  it("returns false when no entries exist", async () => {
+    makeConfig(tmpDir, "{}")
+    const result = await removeToolsDisable(tmpDir, ["github"])
+    expect(result).toBe(false)
+  })
+
+  it("returns false when mcpNames is empty", async () => {
+    makeConfig(tmpDir, "{}")
+    const result = await removeToolsDisable(tmpDir, [])
+    expect(result).toBe(false)
+  })
+})
+
+describe("triage toggle (lock)", () => {
+  it("defaults to enabled when no lock file exists", async () => {
+    const enabled = await isTriageEnabled(tmpDir)
+    expect(enabled).toBe(true)
+  })
+
+  it("toggleTriage writes enabled state to lock", async () => {
+    await toggleTriage(tmpDir, false)
+    const enabled = await isTriageEnabled(tmpDir)
+    expect(enabled).toBe(false)
+  })
+
+  it("toggleTriage can re-enable", async () => {
+    await toggleTriage(tmpDir, false)
+    expect(await isTriageEnabled(tmpDir)).toBe(false)
+    await toggleTriage(tmpDir, true)
+    expect(await isTriageEnabled(tmpDir)).toBe(true)
+  })
+
+  it("lock file contains enabled field after toggle", async () => {
+    await toggleTriage(tmpDir, false)
+    const lock = await readLock(tmpDir)
+    expect(lock?.enabled).toBe(false)
   })
 })

@@ -13,15 +13,15 @@
  * - Benchmarking (--benchmark)
  */
 
-import { readRawConfig, findConfigPath } from "./config.js"
-import { readMcpConfig, readSubagentConfig } from "./config.js"
+import { readRawConfig, findConfigPath, readMcpConfig, readSubagentConfig } from "./config.js"
 import type { McpConfigEntry } from "./types.js"
 import { calcAssignedMcps } from "./utils.js"
 import { levenshtein, suggestCommand } from "./utils.js"
+import { ensureToolsDisabled, removeToolsDisable } from "./writer.js"
+import { isTriageEnabled, toggleTriage } from "./lock.js"
 import { homedir } from "node:os"
-import { join, dirname } from "node:path"
+import { join } from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import { spawn } from "node:child_process"
 
 const PLUGIN_NAME = "opencode-mcp-triage"
@@ -30,6 +30,8 @@ const COMMANDS: Record<string, string> = {
   status: "Show MCP server status, hidden/exposed tools, and subagent routing",
   list: "List all configured MCP servers and subagents",
   measure: "Measure token savings by connecting to each MCP server",
+  enable: "Enable triage — disable MCP tools in main session",
+  disable: "Disable triage — restore MCP tools to main session",
   help: "Show available commands",
 }
 
@@ -121,6 +123,7 @@ async function cmdStatus(
 
   const mcpServers = await readMcpConfig(cwd)
   const subagents = await readSubagentConfig(cwd)
+  const triageOn = await isTriageEnabled(cwd)
 
   const disabledPatterns = extractDisabledPatterns(config.tools)
   const mcpNames = mcpServers.map((s) => s.name)
@@ -196,6 +199,9 @@ async function cmdStatus(
     }
     console.log()
   }
+
+  console.log(`  ${DIM}Triage state:${RESET}  ${triageOn ? GREEN + "● on" + RESET : YELLOW + "○ off" + RESET}`)
+  console.log()
 
   if (hidden.length === 0 && exposed.length === 0) {
     console.log(`  ${DIM}(no MCP servers configured)${RESET}`)
@@ -294,6 +300,30 @@ async function cmdList(
   console.log()
 }
 
+async function cmdEnable(cwd: string): Promise<void> {
+  const mcpServers = await readMcpConfig(cwd)
+  const mcpNames = mcpServers.map((s) => s.name)
+  const modified = await ensureToolsDisabled(cwd, mcpNames)
+  await toggleTriage(cwd, true)
+  if (modified) {
+    console.log(`\n  ${GREEN}●${RESET} Triage enabled. ${mcpNames.length} MCP tool(s) hidden from main session.\n`)
+  } else {
+    console.log(`\n  ${GREEN}●${RESET} Triage already enabled. No changes needed.\n`)
+  }
+}
+
+async function cmdDisable(cwd: string): Promise<void> {
+  const mcpServers = await readMcpConfig(cwd)
+  const mcpNames = mcpServers.map((s) => s.name)
+  const removed = await removeToolsDisable(cwd, mcpNames)
+  await toggleTriage(cwd, false)
+  if (removed) {
+    console.log(`\n  ${YELLOW}○${RESET} Triage disabled. ${mcpNames.length} MCP tool(s) restored to main session.\n`)
+  } else {
+    console.log(`\n  ${YELLOW}○${RESET} Triage already disabled. No changes needed.\n`)
+  }
+}
+
 function cmdHelp(): void {
   console.log()
   console.log(BOLD + "opencode-mcp-triage v0.8.0" + RESET + " — Subagent Router for MCP Tools")
@@ -306,6 +336,8 @@ function cmdHelp(): void {
   console.log("  status        Show MCP server status, hidden/exposed tools, and subagent routing")
   console.log("  list          List all configured MCP servers and subagents")
   console.log("  measure       Connect to MCP servers and measure token savings per turn")
+  console.log("  enable        Enable triage — disable MCP tools in main session")
+  console.log("  disable       Disable triage — restore MCP tools to main session")
   console.log("  help          Show this help")
   console.log()
   console.log(BOLD + "FLAGS" + RESET)
@@ -731,6 +763,12 @@ async function main(): Promise<void> {
       break
     case "measure":
       await cmdMeasure(cwd, asJson, verbose, perServerTimeout)
+      break
+    case "enable":
+      await cmdEnable(cwd)
+      break
+    case "disable":
+      await cmdDisable(cwd)
       break
     case "help":
     default:

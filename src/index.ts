@@ -28,7 +28,8 @@ import { tool } from "@opencode-ai/plugin"
 import type { McpServer, Subagent } from "./types.js"
 import { readMcpConfig, readSubagentConfig } from "./config.js"
 import { scoreSubagents, THRESHOLD } from "./triage.js"
-import { ensureToolsDisabled, ensureSubagentsCreated } from "./writer.js"
+import { ensureToolsDisabled, ensureSubagentsCreated, removeToolsDisable } from "./writer.js"
+import { isTriageEnabled, toggleTriage, readLock } from "./lock.js"
 import { calcAssignedMcps } from "./utils.js"
 
 /** Cache TTL: 5 seconds — balances freshness with performance */
@@ -184,18 +185,25 @@ export const server: Plugin = async ({ directory, client }) => {
   const mcpServers = await getCachedMcpServers()
   const mcpNames = mcpServers.map((s) => s.name)
 
-  // Phase 1: disable all MCP tools in main agent
-  // This MUST complete before returning — otherwise main session
-  // could use MCP tools before they're disabled
-  await ensureToolsDisabled(directory, mcpNames)
+  // Check if triage is enabled (lock file, defaults to true)
+  const triageEnabled = await isTriageEnabled(directory)
 
-  // Phase 2: read current subagents, then auto-create for unassigned MCPs
-  let subagents = await getCachedSubagents()
-  const created = await ensureSubagentsCreated(directory, mcpServers, subagents)
-  if (created > 0) {
-    // Re-read after auto-create so state is accurate
-    subagentCache.invalidate()
+  let subagents: Subagent[] = []
+
+  if (triageEnabled) {
+    // Phase 1: disable all MCP tools in main agent
+    // This MUST complete before returning — otherwise main session
+    // could use MCP tools before they're disabled
+    await ensureToolsDisabled(directory, mcpNames)
+
+    // Phase 2: read current subagents, then auto-create for unassigned MCPs
     subagents = await getCachedSubagents()
+    const created = await ensureSubagentsCreated(directory, mcpServers, subagents)
+    if (created > 0) {
+      // Re-read after auto-create so state is accurate
+      subagentCache.invalidate()
+      subagents = await getCachedSubagents()
+    }
   }
 
   const state = buildState(mcpServers, subagents)
@@ -236,6 +244,31 @@ export const server: Plugin = async ({ directory, client }) => {
           }
 
           const query = args.query.trim()
+
+          // "toggle" — enable/disable triage
+          if (query.toLowerCase() === "toggle") {
+            const current = await isTriageEnabled(directory)
+            const next = !current
+            if (next) {
+              const mcpServers = await getCachedMcpServers()
+              const mcpNames = mcpServers.map((s) => s.name)
+              await ensureToolsDisabled(directory, mcpNames)
+              await toggleTriage(directory, true)
+              subagentCache.invalidate()
+              const sa = await getCachedSubagents()
+              const fresh = buildState(await getCachedMcpServers(), sa)
+              Object.assign(state, fresh)
+            } else {
+              const mcpNames = state.mcpServers.map((s) => s.name)
+              await removeToolsDisable(directory, mcpNames)
+              await toggleTriage(directory, false)
+              state.subagents = []
+              Object.assign(state, buildState(state.mcpServers, []))
+            }
+            showToast(client, `Triage ${next ? "enabled" : "disabled"}`, next ? "success" : "info")
+            const status = next ? "● on" : "○ off"
+            return `Triage ${status}. ${next ? `MCP tools hidden from main session (${state.mcpServers.length} server(s)).` : "MCP tools restored to main session."}`
+          }
 
           // "reload" — re-read config files without restarting
           if (query.toLowerCase() === "reload") {

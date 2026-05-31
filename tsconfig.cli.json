@@ -1,15 +1,10 @@
 {
+  "extends": "./tsconfig.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "skipLibCheck": true,
-    "types": ["node"],
-    "verbatimModuleSyntax": true,
+    "noEmit": false,
     "outDir": "bin",
-    "rootDir": "src",
-    "noEmit": false
+    "rootDir": "src"
   },
-  "include": ["src/cli.ts", "src/config.ts", "src/types.ts", "src/utils.ts", "src/triage.ts", "src/lock.ts", "src/writer.ts"]
+  "include": ["src"],
+  "exclude": ["src/index.ts"]
 }

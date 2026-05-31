@@ -3,13 +3,20 @@
  * postinstall — registers the /mcp-triage slash command
  * into the user's OpenCode commands directory.
  *
+ * Opt-in: set INSTALL_MCP_TRIAGE_COMMAND=1 to enable.
  * Set POSTINSTALL_QUIET=1 to suppress output.
  */
 const { existsSync, mkdirSync, copyFileSync } = require("node:fs")
-const { join, dirname } = require("node:path")
+const { join } = require("node:path")
 const { homedir } = require("node:os")
 
 const quiet = process.env.POSTINSTALL_QUIET === "1"
+const enabled = process.env.INSTALL_MCP_TRIAGE_COMMAND === "1"
+
+if (!enabled) {
+  if (!quiet) console.log("[opencode-mcp-triage] Skipping command registration. Set INSTALL_MCP_TRIAGE_COMMAND=1 to enable.")
+  return
+}
 
 const commandDir = join(homedir(), ".config", "opencode", "commands")
 const source = join(__dirname, ".opencode", "commands", "mcp-triage.md")
