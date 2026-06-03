@@ -143,6 +143,55 @@ describe("removeToolsDisable", () => {
     const result = await removeToolsDisable(tmpDir, [])
     expect(result).toBe(false)
   })
+
+  it("preserves non-MCP tool entries (data-loss regression)", async () => {
+    makeConfig(tmpDir, `{
+  "tools": {
+    "github_*": false,
+    "bash": true,
+    "read": true
+  }
+}`)
+    const result = await removeToolsDisable(tmpDir, ["github"])
+    expect(result).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"github_*"')
+    expect(raw).toContain('"bash": true')
+    expect(raw).toContain('"read": true')
+    expect(raw).toContain("tools")
+  })
+
+  it("removes first entry in block (no leading comma)", async () => {
+    makeConfig(tmpDir, `{
+  "tools": {
+    "github_*": false,
+    "supabase_*": false
+  }
+}`)
+    const result = await removeToolsDisable(tmpDir, ["github"])
+    expect(result).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"github_*"')
+    expect(raw).toContain('"supabase_*"')
+    // Verify still valid JSON
+    expect(() => JSON.parse(raw)).not.toThrow()
+  })
+
+  it("removes multiple entries in one pass", async () => {
+    makeConfig(tmpDir, `{
+  "tools": {
+    "github_*": false,
+    "supabase_*": false,
+    "render_*": false
+  }
+}`)
+    const result = await removeToolsDisable(tmpDir, ["github", "render"])
+    expect(result).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"github_*"')
+    expect(raw).not.toContain('"render_*"')
+    expect(raw).toContain('"supabase_*"')
+  })
 })
 
 describe("triage toggle (lock)", () => {

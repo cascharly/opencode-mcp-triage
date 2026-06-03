@@ -21,7 +21,7 @@ import type { McpServer, McpConfigEntry, Subagent } from "./types.js"
 import { readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { MAX_CONFIG_SIZE, stripBOM, validatePath } from "./utils.js"
+import { MAX_CONFIG_SIZE, stripBOM, validatePath, stripJsonc, mergeConfigSection } from "./utils.js"
 
 interface SubagentConfig {
   mode?: string
@@ -62,14 +62,15 @@ function getConfigPaths(baseDir: string): string[] {
 export async function readMcpConfig(
   directory: string
 ): Promise<McpServer[]> {
-  const globalConfig = await findAndParseConfig(homedir())
-  const projectConfig = await findAndParseConfig(directory)
-
-  const globalMcp = (globalConfig?.mcp as Record<string, McpConfigEntry> | undefined) ?? {}
-  const projectMcp = (projectConfig?.mcp as Record<string, McpConfigEntry> | undefined) ?? {}
+  const globalConfig = await findAndParseConfig(homedir(), "mcp")
+  const projectConfig = await findAndParseConfig(directory, "mcp")
 
   // Project overrides global for same-named servers
-  const merged: Record<string, McpConfigEntry> = { ...globalMcp, ...projectMcp }
+  const merged = mergeConfigSection<Record<string, McpConfigEntry>>(
+    globalConfig,
+    projectConfig,
+    "mcp"
+  )
 
   return Object.entries(merged)
     .filter(([, entry]) => entry.enabled !== false)
@@ -95,14 +96,15 @@ export async function readMcpConfig(
 export async function readSubagentConfig(
   directory: string
 ): Promise<Subagent[]> {
-  const globalConfig = await findAndParseConfig(homedir())
-  const projectConfig = await findAndParseConfig(directory)
-
-  const globalAgent = (globalConfig?.agent as Record<string, SubagentConfig> | undefined) ?? {}
-  const projectAgent = (projectConfig?.agent as Record<string, SubagentConfig> | undefined) ?? {}
+  const globalConfig = await findAndParseConfig(homedir(), "agent")
+  const projectConfig = await findAndParseConfig(directory, "agent")
 
   // Project overrides global for same-named agents
-  const merged: Record<string, SubagentConfig> = { ...globalAgent, ...projectAgent }
+  const merged = mergeConfigSection<Record<string, SubagentConfig>>(
+    globalConfig,
+    projectConfig,
+    "agent"
+  )
 
   const result: Subagent[] = []
 
@@ -111,11 +113,14 @@ export async function readSubagentConfig(
     if (entry.mode === "primary") continue
     if (!entry.tools || typeof entry.tools !== "object") continue
 
-    // Extract MCP server names from tool scoping patterns like "github_*": true
+    // Extract MCP server names from tool scoping patterns like "github_*": true.
+    // Require exact "_*" suffix — bare "*" would not match opencode's glob
+    // for tools like github_create_issue, so we'd record a phantom coverage
+    // and the subagent would end up with zero tools.
     const tools = entry.tools as Record<string, boolean>
     const mcpServers = Object.keys(tools)
       .filter((k) => k.endsWith("_*") && tools[k] === true)
-      .map((k) => k.replace(/_?\*$/, ""))
+      .map((k) => k.slice(0, -2))
 
     // Skip agents without MCP tool scoping
     if (mcpServers.length === 0) continue
@@ -131,90 +136,21 @@ export async function readSubagentConfig(
 }
 
 /**
- * Strips JSONC comments and trailing commas for JSON.parse compatibility.
- *
- * Handles:
- * - Block comments /* ... * /
- * - Line comments // ... (negative lookbehind avoids matching :// in URLs)
- * - Trailing commas before } or ]
- *
- * Note: This is a simple stripper, not a full JSONC parser.
- * It works for typical opencode.jsonc files but could fail on edge cases
- * like // inside strings. For production use, consider a proper JSONC library.
- */
-/** @internal exported for testing */
-export function stripJsonc(raw: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-
-  while (i < raw.length) {
-    const ch = raw[i]
-
-    if (inString) {
-      result += ch
-      if (escape) {
-        escape = false
-      } else if (ch === "\\") {
-        escape = true
-      } else if (ch === '"') {
-        inString = false
-      }
-      i++
-      continue
-    }
-
-    // Block comment: /* ... */
-    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "*") {
-      i += 2
-      while (i < raw.length) {
-        if (raw[i] === "*" && i + 1 < raw.length && raw[i + 1] === "/") {
-          i += 2
-          break
-        }
-        i++
-      }
-      continue
-    }
-
-    // Line comment: // ... (only when not inside a string)
-    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
-      i += 2
-      while (i < raw.length && raw[i] !== "\n") {
-        i++
-      }
-      continue
-    }
-
-    if (ch === '"') {
-      inString = true
-    }
-
-    result += ch
-    i++
-  }
-
-  // Strip trailing commas before } or ]
-  result = result.replace(/,(?=\s*[}\]])/g, "")
-  return result
-}
-
-/**
  * Finds and parses an opencode config file from a base directory.
  *
  * Search order (global vs project differs):
  * - Global: ~/.config/opencode/opencode.jsonc → opencode.json
  * - Project: .opencode/opencode.json → opencode.jsonc → opencode.jsonc → opencode.json
  *
- * Returns the first valid JSONC file that contains "mcp" or "agent" keys.
- * The key guard prevents returning unrelated JSON files (e.g., some other
- * tool's opencode.json).
+ * When `requireKey` is set, returns only configs that contain that key
+ * (used to distinguish opencode config from unrelated opencode.json files).
+ * When omitted, returns the first valid JSONC parse.
  *
  * Returns null if no valid config is found.
  */
 async function findAndParseConfig(
-  baseDir: string
+  baseDir: string,
+  requireKey?: "mcp" | "agent"
 ): Promise<Record<string, unknown> | null> {
   const paths = getConfigPaths(baseDir)
 
@@ -222,16 +158,10 @@ async function findAndParseConfig(
     if (!validatePath(path)) continue
     try {
       const raw = await readFile(path, "utf-8")
-
-      // Size limit: reject files > 1MB to prevent memory exhaustion
       if (raw.length > MAX_CONFIG_SIZE) continue
-
-      // Strip BOM (Windows editors may prepend it)
       const cleaned = stripBOM(raw)
-
       const json = JSON.parse(stripJsonc(cleaned))
-      // Guard: must have mcp or agent keys to be valid opencode config
-      if (json && (json.mcp || json.agent)) return json
+      if (!requireKey || (json && json[requireKey])) return json
     } catch {
       // File not found or invalid JSON — try next path
     }
@@ -242,29 +172,15 @@ async function findAndParseConfig(
 
 /**
  * Reads a raw opencode config file (any JSONC format) from a directory.
- * Unlike findAndParseConfig, this does NOT require "mcp" or "agent" keys.
- * Used by CLI to read full config including "tools" and "plugin" sections.
+ * Does NOT require "mcp" or "agent" keys — used by CLI to read full
+ * config including "tools" and "plugin" sections.
  *
  * Returns null if no valid config file is found.
  */
 export async function readRawConfig(
   baseDir: string
 ): Promise<Record<string, unknown> | null> {
-  const paths = getConfigPaths(baseDir)
-
-  for (const path of paths) {
-    if (!validatePath(path)) continue
-    try {
-      const raw = await readFile(path, "utf-8")
-      if (raw.length > MAX_CONFIG_SIZE) continue
-      const cleaned = stripBOM(raw)
-      return JSON.parse(stripJsonc(cleaned))
-    } catch {
-      // File not found or invalid — try next
-    }
-  }
-
-  return null
+  return findAndParseConfig(baseDir)
 }
 
 /**

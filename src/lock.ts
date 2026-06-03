@@ -9,7 +9,8 @@ const MAX_LOCK_SIZE = 64 * 1024
 
 export interface LockFile {
   version: 1
-  autoCreated: Record<string, string>
+  /** MCP server names that triage auto-created subagents for. User-deleted entries stay here so triage won't re-create. */
+  autoCreated: string[]
   /** false = triage disabled (MCP tools visible in main session) */
   enabled?: boolean
 }
@@ -39,7 +40,7 @@ export async function toggleTriage(
 ): Promise<boolean> {
   const lock = (await readLock(directory)) ?? {
     version: 1 as const,
-    autoCreated: {},
+    autoCreated: [],
   }
   lock.enabled = enabled
   await writeLock(directory, lock)

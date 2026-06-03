@@ -223,18 +223,13 @@ export const server: Plugin = async ({ directory, client }) => {
        */
       triage_mcp: tool({
         description:
-          "Discover and route to the right MCP subagent. " +
-          "Call this before any non-trivial MCP task. " +
-          "Pass a short description of what you need. " +
-          "Returns the best matching subagent and its available MCP tools. " +
-          "Use query 'reload' to re-read MCP config without restarting.",
+          "Route a task to the best MCP subagent via keyword matching. " +
+          "Call before MCP work; use 'reload' to refresh config.",
         args: {
           query: tool.schema
             .string()
             .describe(
-              "What you want to do — e.g. 'search library docs', " +
-                "'manage GitHub issues', 'database operations', " +
-                "or 'reload' to refresh MCP config"
+              "Short task description, or 'reload' to refresh MCP config"
             ),
         },
         async execute(args, context) {
@@ -259,11 +254,13 @@ export const server: Plugin = async ({ directory, client }) => {
               const fresh = buildState(await getCachedMcpServers(), sa)
               Object.assign(state, fresh)
             } else {
-              const mcpNames = state.mcpServers.map((s) => s.name)
+              // Re-fetch to ensure we remove disable entries for any MCPs added
+              // since the cache was last populated.
+              const mcpServers = await getCachedMcpServers()
+              const mcpNames = mcpServers.map((s) => s.name)
               await removeToolsDisable(directory, mcpNames)
               await toggleTriage(directory, false)
-              state.subagents = []
-              Object.assign(state, buildState(state.mcpServers, []))
+              Object.assign(state, buildState(mcpServers, []))
             }
             showToast(client, `Triage ${next ? "enabled" : "disabled"}`, next ? "success" : "info")
             const status = next ? "● on" : "○ off"
@@ -493,48 +490,6 @@ export const server: Plugin = async ({ directory, client }) => {
     },
 
     /**
-     * Post-tool execution: inject routing hints into tool output.
-     *
-     * Detects patterns that suggest MCP-related work and appends
-     * a hint to use triage_mcp for routing.
-     *
-     * Guards:
-     * - typeof check prevents crash on unexpected output types
-     * - text.includes dedup prevents same hint being appended repeatedly
-     * - try/catch handles frozen/read-only output objects
-     */
-    async "tool.execute.after"(_input, output) {
-      if (!output || typeof output.output !== "string") return
-
-      const text = output.output
-      const hints: string[] = []
-
-      if ((text.includes("CONFLICT") || text.includes("merge conflict")) && !text.includes("[Hint] Merge conflict")) {
-        hints.push("[Hint] Merge conflicts detected. Use triage_mcp with 'git' to find the right subagent.")
-      }
-
-      if (/\brg\b/.test(text) || /\bgrep\b/.test(text)) {
-        if (!text.includes("[Hint] For code search")) {
-          hints.push("[Hint] For code search, try triage_mcp with 'search code' to route to a code-aware subagent.")
-        }
-      }
-
-      if (text.includes("ERR!") && (text.includes("npm") || text.includes("npx")) && !text.includes("[Hint] Package error")) {
-        hints.push("[Hint] Package error detected. Use triage_mcp with 'package' or 'npm' for routing.")
-      }
-
-      if (hints.length > 0) {
-        try {
-          const existingHints = text.match(/\[Hint\]/g)
-          if (existingHints && existingHints.length >= 3) return
-          output.output = text + "\n\n" + hints.join("\n")
-        } catch {
-          // output may be read-only — skip
-        }
-      }
-    },
-
-    /**
      * System prompt transform: inject MCP routing status into system prompt.
      *
      * Adds a compact summary of available MCP subagents so the AI knows
@@ -551,7 +506,10 @@ export const server: Plugin = async ({ directory, client }) => {
 
       if (subagents.length === 0) return
 
-      const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_\-\. ]/g, "")
+      // Strip only chars that would break the system prompt line — quotes,
+      // backslashes, newlines, and control chars. Keep unicode, hyphens,
+      // dots, slashes, etc. for human-readable subagent/MCP names.
+      const sanitize = (s: string) => s.replace(/["\\\n\r\t\0]/g, "")
 
       const routes = subagents
         .map((sa) => `@${sanitize(sa.name)} → ${sa.mcpServers.map(sanitize).join(", ")}`)

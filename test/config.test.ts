@@ -8,11 +8,16 @@
  * - Trailing comma removal
  * - URL preservation (:// not stripped)
  * - String-aware comment stripping
+ * - Phantom glob bug fix in subagent detection
+ * - mergeConfigSection helper
  */
 
-import { describe, it, expect } from "vitest"
-import { stripJsonc } from "../src/config.js"
-import { stripBOM } from "../src/utils.js"
+import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { stripJsonc, stripBOM, mergeConfigSection } from "../src/utils.js"
+import { readSubagentConfig } from "../src/config.js"
 
 describe("stripBOM", () => {
   it("removes UTF-8 BOM", () => {
@@ -156,5 +161,88 @@ describe("size limit", () => {
     const MAX_CONFIG_SIZE = 1024 * 1024
     const exact = "a".repeat(MAX_CONFIG_SIZE)
     expect(exact.length).toBe(MAX_CONFIG_SIZE)
+  })
+})
+
+describe("mergeConfigSection", () => {
+  it("returns empty when neither level has the key", () => {
+    expect(mergeConfigSection({}, {}, "missing")).toEqual({})
+  })
+
+  it("returns project override over global for the merged key", () => {
+    const global = { mcp: { a: 1 } }
+    const project = { mcp: { a: 2 } }
+    expect(mergeConfigSection(global, project, "mcp")).toEqual({ a: 2 })
+  })
+
+  it("merges entries from both levels for the key", () => {
+    const global = { mcp: { a: 1 } }
+    const project = { mcp: { b: 2 } }
+    expect(mergeConfigSection(global, project, "mcp")).toEqual({ a: 1, b: 2 })
+  })
+
+  it("handles null config levels", () => {
+    expect(mergeConfigSection(null, { mcp: { a: 1 } }, "mcp")).toEqual({ a: 1 })
+    expect(mergeConfigSection({ mcp: { a: 1 } }, null, "mcp")).toEqual({ a: 1 })
+  })
+
+  it("returns empty when the key is absent from both", () => {
+    expect(mergeConfigSection({ x: 1 }, { y: 2 }, "mcp")).toEqual({})
+  })
+})
+
+describe("readSubagentConfig — phantom glob bug fix", () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "cfg-phantom-"))
+    mkdirSync(join(tmpDir, ".opencode"), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("matches 'github_*' as covering github MCP", async () => {
+    writeFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), `{
+  "agent": {
+    "gh": {
+      "mode": "subagent",
+      "tools": { "github_*": true }
+    }
+  }
+}`)
+    const subs = await readSubagentConfig(tmpDir)
+    const gh = subs.filter((s) => s.name === "gh")
+    expect(gh).toHaveLength(1)
+    expect(gh[0].mcpServers).toEqual(["github"])
+  })
+
+  it("does NOT match bare 'github*' (no underscore) as covering github MCP", async () => {
+    writeFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), `{
+  "agent": {
+    "gh": {
+      "mode": "subagent",
+      "tools": { "github*": true }
+    }
+  }
+}`)
+    const subs = await readSubagentConfig(tmpDir)
+    const gh = subs.filter((s) => s.name === "gh")
+    expect(gh).toHaveLength(0)
+  })
+
+  it("skips false-valued tool entries", async () => {
+    writeFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), `{
+  "agent": {
+    "gh": {
+      "mode": "subagent",
+      "tools": { "github_*": false }
+    }
+  }
+}`)
+    const subs = await readSubagentConfig(tmpDir)
+    const gh = subs.filter((s) => s.name === "gh")
+    expect(gh).toHaveLength(0)
   })
 })

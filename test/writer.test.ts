@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { stripJsonComments, mapStrippedPosition, findClosingRootBrace, jsonEscape } from "../src/writer.js"
+import { mapStrippedPosition, findClosingRootBrace, jsonEscape, findMatchingBrace } from "../src/writer.js"
+import { stripJsonc } from "../src/utils.js"
 
 describe("mapStrippedPosition", () => {
   it("maps position when no comments exist", () => {
@@ -38,7 +39,7 @@ describe("mapStrippedPosition", () => {
 
   it("handles multiple comments", () => {
     const original = '{\n  // a\n  /* b */\n  "key": 1\n}'
-    const stripped = stripJsonComments(original)
+    const stripped = stripJsonc(original)
     const strippedPos = stripped.indexOf('"key"')
     const origPos = mapStrippedPosition(original, stripped, strippedPos)
     expect(original.slice(origPos, origPos + 5)).toBe('"key"')
@@ -110,24 +111,59 @@ describe("jsonEscape", () => {
   })
 })
 
-describe("stripJsonComments", () => {
+describe("stripJsonComments (writer delegate to utils.stripJsonc)", () => {
   it("removes line comments", () => {
     const input = '{\n  "key": "value" // comment\n}'
-    const result = stripJsonComments(input)
+    const result = stripJsonc(input)
     expect(result).toContain('"key": "value"')
     expect(result).not.toContain("// comment")
   })
 
   it("removes block comments", () => {
     const input = '{\n  /* comment */\n  "key": "value"\n}'
-    const result = stripJsonComments(input)
+    const result = stripJsonc(input)
     expect(result).toContain('"key": "value"')
     expect(result).not.toContain("/* comment */")
   })
 
   it("preserves URLs", () => {
     const input = '{"url": "https://example.com"}'
-    const result = stripJsonComments(input)
+    const result = stripJsonc(input)
     expect(result).toContain("https://example.com")
+  })
+})
+
+describe("findMatchingBrace", () => {
+  it("finds matching close for simple object", () => {
+    expect(findMatchingBrace('{"a": 1}', 0)).toBe(7)
+  })
+
+  it("finds matching close with nested objects", () => {
+    expect(findMatchingBrace('{"a": {"b": 2}}', 0)).toBe(14)
+  })
+
+  it("ignores braces inside strings", () => {
+    expect(findMatchingBrace('{"k": "v } here"}', 0)).toBe(16)
+  })
+
+  it("treats escaped quotes as inside-string", () => {
+    // The } at index 12 sits between an escaped quote and a real closing quote.
+    // findMatchingBrace should ignore it and return the outer close at 14.
+    const input = '{"k": "v \\" }"}'
+    expect(findMatchingBrace(input, 0)).toBe(14)
+  })
+
+  it("returns -1 when string never closes (unterminated escape)", () => {
+    // \"  is an escaped quote, then no more quotes. The "{" at 0 is still
+    // considered open and the function returns -1.
+    expect(findMatchingBrace('{"k": "v \\"', 0)).toBe(-1)
+  })
+
+  it("returns -1 when not found", () => {
+    expect(findMatchingBrace('{"a": 1', 0)).toBe(-1)
+  })
+
+  it("returns -1 for non-brace index", () => {
+    expect(findMatchingBrace('"a": 1', 0)).toBe(-1)
   })
 })

@@ -24,7 +24,7 @@ import { join, dirname } from "node:path"
 import { homedir } from "node:os"
 import { readLock, writeLock } from "./lock.js"
 import type { McpServer, Subagent } from "./types.js"
-import { MAX_CONFIG_SIZE, stripBOM, validatePath, escapeRegex, safeWriteFile } from "./utils.js"
+import { MAX_CONFIG_SIZE, stripBOM, validatePath, escapeRegex, safeWriteFile, stripJsonc } from "./utils.js"
 
 /**
  * Ensures all MCP server tools are disabled in the main agent's tools config.
@@ -62,12 +62,13 @@ export async function ensureToolsDisabled(
     raw = "{}"
   }
 
+
   // Strip BOM (Windows editors may prepend it)
   raw = stripBOM(raw)
 
   // Strip comments before checking — comments like // "github_*": false
   // should not count as actual disable entries
-  const stripped = stripJsonComments(raw)
+  const stripped = stripJsonc(raw)
   const missing = mcpServers.filter((name) => {
     const regex = new RegExp(
       `"${escapeRegex(name)}_\\*"\\s*:\\s*false`
@@ -94,7 +95,7 @@ export async function ensureToolsDisabled(
     const suffix = raw.slice(insertPos)
 
     // Check if tools block is empty {} (skip comments to find real closing brace)
-    const suffixStripped = stripJsonComments(suffix)
+    const suffixStripped = stripJsonc(suffix)
     const emptyBlockMatch = suffixStripped.match(/^\s*\}/)
     if (emptyBlockMatch) {
       // Empty block: replace {} with { newEntries }
@@ -110,7 +111,7 @@ export async function ensureToolsDisabled(
     const toolsBlock = `"tools": {\n    ${newEntries}\n  }`
 
     // Use stripped version to find closing brace (comments can contain } chars)
-    const strippedForBrace = stripJsonComments(raw)
+    const strippedForBrace = stripJsonc(raw)
     const closingBrace = findClosingRootBrace(strippedForBrace)
 
     if (closingBrace >= 0) {
@@ -131,7 +132,7 @@ export async function ensureToolsDisabled(
   // Safety check: validate the modified content parses as valid JSON
   // Catches bugs in string manipulation before corrupting the config file
   try {
-    JSON.parse(stripJsonComments(modified))
+    JSON.parse(stripJsonc(modified))
   } catch {
     throw new Error("Generated invalid JSONC when disabling MCP tools")
   }
@@ -173,9 +174,7 @@ export async function ensureSubagentsCreated(
   // Read lock file — MCPs in autoCreated were previously created
   // If user deleted them, they stay in the lock file and we respect that
   const lock = await readLock(directory)
-  const previouslyCreated = new Set(
-    lock ? Object.keys(lock.autoCreated) : []
-  )
+  const previouslyCreated = new Set(lock?.autoCreated ?? [])
 
   // MCPs that need subagents: not covered AND not previously declined
   const toCreate = mcpServers.filter(
@@ -201,15 +200,16 @@ export async function ensureSubagentsCreated(
 
   // Build subagent entries as JSON text
   const entries = toCreate.map((mcp) => {
+    const safeName = jsonEscape(mcp.name)
     const desc = mcp.description
       ? jsonEscape(mcp.description)
       : `${mcp.name} operations`
-    return `"${mcp.name}": {\n      "description": "${desc}",\n      "mode": "subagent",\n      "tools": {\n        "${mcp.name}_*": true\n      }\n    }`
+    return `"${safeName}": {\n      "description": "${desc}",\n      "mode": "subagent",\n      "tools": {\n        "${safeName}_*": true\n      }\n    }`
   })
 
   const entriesText = entries.join(",\n    ")
 
-  const stripped = stripJsonComments(raw)
+  const stripped = stripJsonc(raw)
   const agentMatch = stripped.match(/"agent"\s*:\s*\{/)
 
   let modified: string
@@ -223,7 +223,7 @@ export async function ensureSubagentsCreated(
     const prefix = raw.slice(0, insertPos)
     const suffix = raw.slice(insertPos)
 
-    const suffixStripped = stripJsonComments(suffix)
+    const suffixStripped = stripJsonc(suffix)
     const emptyBlockMatch = suffixStripped.match(/^\s*\}/)
     if (emptyBlockMatch) {
       const emptyEndPos = mapStrippedPosition(
@@ -240,7 +240,7 @@ export async function ensureSubagentsCreated(
     const agentBlock =
       `"agent": {\n    ${entriesText}\n  }`
 
-    const strippedForBrace = stripJsonComments(raw)
+    const strippedForBrace = stripJsonc(raw)
     const closingBrace = findClosingRootBrace(strippedForBrace)
 
     if (closingBrace >= 0) {
@@ -256,7 +256,7 @@ export async function ensureSubagentsCreated(
 
   // Safety check
   try {
-    JSON.parse(stripJsonComments(modified))
+    JSON.parse(stripJsonc(modified))
   } catch {
     throw new Error("Generated invalid JSONC when creating subagent entries")
   }
@@ -264,15 +264,11 @@ export async function ensureSubagentsCreated(
   await safeWriteFile(resolved.path, modified)
 
   // Update lock file
-  const newAutoCreated: Record<string, string> = {
-    ...(lock?.autoCreated ?? {}),
-  }
-  for (const m of toCreate) {
-    newAutoCreated[m.name] = m.name
-  }
+  const existing = new Set(lock?.autoCreated ?? [])
+  for (const m of toCreate) existing.add(m.name)
   await writeLock(directory, {
     version: 1,
-    autoCreated: newAutoCreated,
+    autoCreated: Array.from(existing),
     enabled: lock?.enabled,
   })
 
@@ -283,9 +279,8 @@ export async function ensureSubagentsCreated(
  * Removes all "servername_*": false disable entries from config.
  * Reverse of ensureToolsDisabled. Restores MCP tools to main session.
  *
- * Uses regex on raw string since entries follow predictable format
- * (written by ensureToolsDisabled). Cleans up trailing commas and
- * empty tools blocks after removal.
+ * Scoped to the "tools" block: other tool entries (e.g. "bash": true) are
+ * preserved. Only deletes the whole tools block when it becomes truly empty.
  *
  * @returns true if file was modified
  */
@@ -307,32 +302,97 @@ export async function removeToolsDisable(
   }
 
   raw = stripBOM(raw)
-  let modified = raw
+  const stripped = stripJsonc(raw)
+  const toolsMatch = stripped.match(/"tools"\s*:\s*\{/)
+  if (!toolsMatch || toolsMatch.index === undefined) return false
+
+  const keyEndInStripped = toolsMatch.index + toolsMatch[0].length
+  const blockEndInStripped = findMatchingBrace(stripped, keyEndInStripped - 1)
+  if (blockEndInStripped < 0) return false
+
+  // Map positions back to original (comments shift them)
+  const origKeyStart = mapStrippedPosition(raw, stripped, toolsMatch.index)
+  const origKeyEnd = mapStrippedPosition(raw, stripped, keyEndInStripped)
+  const origBlockEnd = mapStrippedPosition(raw, stripped, blockEndInStripped) + 1
+
+  const blockRaw = raw.slice(origKeyEnd, origBlockEnd)
+  let modifiedBlock = blockRaw
 
   for (const name of mcpNames) {
     const escaped = escapeRegex(name)
+    // Match entry on its own line: optional leading separator, the entry, optional trailing comma.
+    // Leading context can be: opening brace (first entry), comma+newline, or just whitespace+newline.
     const re = new RegExp(
-      `(,\\s*)?\\r?\\n\\s*\\"${escaped}_\\*\\"\\s*\\:\\s*false`,
+      `[,\\s\\r\\n]*\\"${escaped}_\\*\\"\\s*:\\s*false\\s*,?\\s*\\r?\\n?`,
       "g"
     )
-    modified = modified.replace(re, "")
+    modifiedBlock = modifiedBlock.replace(re, "")
   }
 
-  if (modified === raw) return false
+  if (modifiedBlock === blockRaw) return false
 
-  modified = modified.replace(/,\s*(\r?\n\s*")/g, "$1")
-  modified = modified.replace(/,\s*(\n\s*[\}\]])/g, "$1")
-  modified = modified.replace(/"tools"\s*:\s*\{\s*(\n\s*)?\}/g, "")
-  modified = modified.replace(/,\s*([}\]])/g, "$1")
+  // Strip any dangling trailing comma left in the block
+  modifiedBlock = modifiedBlock.replace(/,(\s*})/, "$1")
+
+  // Detect empty block (only whitespace + braces)
+  const blockContent = stripJsonc(modifiedBlock).replace(/^[\s{}]+|[\s{}]+$/g, "")
+  const isEmpty = blockContent === ""
+
+  let modified: string
+  if (isEmpty) {
+    // Remove the whole "tools": { ... } key+block from raw
+    const before = raw.slice(0, origKeyStart).replace(/,(\s*})$/, "$1")
+    const after = raw.slice(origBlockEnd)
+    modified = before + after
+  } else {
+    modified = raw.slice(0, origKeyEnd) + modifiedBlock + raw.slice(origBlockEnd)
+  }
 
   try {
-    JSON.parse(stripJsonComments(modified))
+    JSON.parse(stripJsonc(modified))
   } catch {
     return false
   }
 
   await safeWriteFile(resolved.path, modified)
   return true
+}
+
+/**
+ * Finds the index of the closing brace matching the opening brace at `openIdx`.
+ * Scans forward with depth tracking and string awareness.
+ * Returns -1 if not found.
+ *
+ * @internal exported for testing
+ */
+export function findMatchingBrace(s: string, openIdx: number): number {
+  if (s[openIdx] !== "{") return -1
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = openIdx; i < s.length; i++) {
+    const ch = s[i]
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === "\\") {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === "{") depth++
+    if (ch === "}") {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
 }
 
 /**
@@ -417,67 +477,6 @@ export function mapStrippedPosition(original: string, stripped: string, stripped
     origIdx++
   }
   return origIdx
-}
-
-/**
- * Strips JSONC comments from a raw JSON string.
- *
- * Handles:
- * - Block comments: /* ... * /
- * - Line comments: // ... (negative lookbehind (?<!:) avoids matching :// in URLs)
- * - String awareness: // inside quoted strings is NOT treated as comment
- *
- * Does NOT handle trailing commas — that's handled separately in stripJsonc().
- * This version is simpler because we only need it for regex matching, not parsing.
- */
-/** @internal exported for testing */
-export function stripJsonComments(raw: string): string {
-  let result = raw.replace(/\/\*[\s\S]*?\*\//g, "")
-  result = stripLineComments(result)
-  return result
-}
-
-function stripLineComments(raw: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-
-  while (i < raw.length) {
-    const ch = raw[i]
-
-    if (inString) {
-      result += ch
-      if (escape) {
-        escape = false
-      } else if (ch === "\\") {
-        escape = true
-      } else if (ch === '"') {
-        inString = false
-      }
-      i++
-      continue
-    }
-
-    if (ch === '"') {
-      inString = true
-      result += ch
-      i++
-      continue
-    }
-
-    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
-      while (i < raw.length && raw[i] !== "\n") {
-        i++
-      }
-      continue
-    }
-
-    result += ch
-    i++
-  }
-
-  return result
 }
 
 /** @internal exported for testing */

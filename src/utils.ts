@@ -99,3 +99,86 @@ export function suggestCommand(typo: string, validCommands: string[]): string | 
   }
   return bestDist <= 3 ? best : null
 }
+
+/**
+ * Strips JSONC comments and trailing commas for JSON.parse compatibility.
+ *
+ * Single-pass char loop with string-awareness. Handles:
+ * - Block comments (slash-star ... star-slash)
+ * - Line comments // (excluded inside strings, so URLs like https:// safe)
+ * - Trailing commas before } or ]
+ *
+ * Robust to block-comment markers inside quoted strings. Char loop tracks
+ * inString state. Naive regex strippers (e.g. replacing block-comment markers
+ * globally) fail on strings containing such markers like "use marker here".
+ */
+export function stripJsonc(raw: string): string {
+  let result = ""
+  let inString = false
+  let escape = false
+  let i = 0
+
+  while (i < raw.length) {
+    const ch = raw[i]
+
+    if (inString) {
+      result += ch
+      if (escape) {
+        escape = false
+      } else if (ch === "\\") {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      i++
+      continue
+    }
+
+    // Block comment: /* ... */
+    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "*") {
+      i += 2
+      while (i < raw.length) {
+        if (raw[i] === "*" && i + 1 < raw.length && raw[i + 1] === "/") {
+          i += 2
+          break
+        }
+        i++
+      }
+      continue
+    }
+
+    // Line comment: // ... (only when not inside a string)
+    if (ch === "/" && i + 1 < raw.length && raw[i + 1] === "/") {
+      i += 2
+      while (i < raw.length && raw[i] !== "\n") {
+        i++
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+    }
+
+    result += ch
+    i++
+  }
+
+  // Strip trailing commas before } or ]
+  return result.replace(/,(?=\s*[}\]])/g, "")
+}
+
+/**
+ * Merges global + project config sections with project-overrides-global.
+ * Generic helper to dedup the { ...global.x, ...project.x } pattern.
+ * Returns empty object when neither level has the key.
+ */
+export function mergeConfigSection<T extends Record<string, unknown>>(
+  global: Record<string, unknown> | null,
+  project: Record<string, unknown> | null,
+  key: string
+): T {
+  const g = (global?.[key] as T | undefined) ?? ({} as T)
+  const p = (project?.[key] as T | undefined) ?? ({} as T)
+  return { ...g, ...p } as T
+}

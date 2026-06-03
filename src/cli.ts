@@ -20,11 +20,12 @@ import { levenshtein, suggestCommand } from "./utils.js"
 import { ensureToolsDisabled, removeToolsDisable } from "./writer.js"
 import { isTriageEnabled, toggleTriage } from "./lock.js"
 import { homedir } from "node:os"
-import { join } from "node:path"
-import { readFileSync, readdirSync } from "node:fs"
 import { spawn } from "node:child_process"
 
 const PLUGIN_NAME = "opencode-mcp-triage"
+
+/** MCP protocol version announced during initialize. Override via MCP_PROTOCOL_VERSION env. */
+const MCP_PROTOCOL_VERSION = process.env.MCP_PROTOCOL_VERSION || "2024-11-05"
 
 const COMMANDS: Record<string, string> = {
   status: "Show MCP server status, hidden/exposed tools, and subagent routing",
@@ -52,11 +53,19 @@ function isPluginActive(
   if (!config) return false
   const plugins = config.plugin as unknown[] | undefined
   if (!Array.isArray(plugins)) return false
-  return plugins.some(
-    (pl) =>
-      typeof pl === "string" &&
-      (pl.includes(PLUGIN_NAME) || pl === "file:" + searchPath)
-  )
+  // Match either the npm package name, a file: path pointing at the plugin,
+  // or a local path whose last segment contains the package name. Anchored
+  // with path separator or start/end to avoid matching unrelated paths that
+  // happen to contain "opencode-mcp-triage" as a substring.
+  return plugins.some((pl) => {
+    if (typeof pl !== "string") return false
+    if (pl === PLUGIN_NAME) return true
+    if (pl.startsWith("file:")) {
+      // Accept file: URL of the installed package, or a local dev path
+      return pl === "file:" + searchPath || /[\\/]opencode-mcp-triage([\\/]|$)/.test(pl)
+    }
+    return false
+  })
 }
 
 /**
@@ -366,50 +375,10 @@ function cmdHelp(): void {
 
 // ── Measure (token savings) ────────────────────────────────
 
-interface TokenCache {
-  token: string
-  type: string
-}
-
 interface MeasureStats {
   tools: number
   chars: number
   tokensEst: number
-}
-
-async function loadCachedTokens(verbose: boolean): Promise<TokenCache[]> {
-  const results: TokenCache[] = []
-  const authDir = join(homedir(), ".mcp-auth")
-  try {
-    const entries = readdirSync(authDir, { withFileTypes: true })
-    for (const entry of entries) {
-      const full = join(authDir, entry.name)
-      if (entry.isDirectory()) {
-        const sub = readdirSync(full, { withFileTypes: true })
-        for (const s of sub) {
-          const sf = join(full, s.name)
-          if (s.isDirectory()) continue
-          if (!s.name.endsWith("_tokens.json")) continue
-          try {
-            const raw = readFileSync(sf, "utf-8")
-            const tokens = JSON.parse(raw) as { access_token?: string; token_type?: string }
-            if (tokens.access_token) {
-              results.push({
-                token: tokens.access_token,
-                type: tokens.token_type || "Bearer",
-              })
-            }
-          } catch {
-            // Generic error — don't leak token filenames to stderr
-            if (verbose) process.stderr.write(` [mcp-auth: token read error]`)
-          }
-        }
-      }
-    }
-  } catch {
-    if (verbose) process.stderr.write(` [mcp-auth: dir not found]`)
-  }
-  return results
 }
 
 function parseSse(text: string): unknown[] {
@@ -446,7 +415,7 @@ async function mcpListTools(
     body: JSON.stringify({
       jsonrpc: "2.0", id: "1", method: "initialize",
       params: {
-        protocolVersion: "2024-11-05", capabilities: {},
+        protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {},
         clientInfo: { name: "scanner", version: "1.0.0" },
       },
     }),
@@ -526,33 +495,13 @@ async function measureViaHttp(
 }
 
 /**
- * Iterates cached auth tokens against a remote MCP URL.
- * Falls through tokens silently until one succeeds or all fail.
- * Delegates actual HTTP handshake to measureViaHttp + mcpListTools.
+ * MCP measure: spawns the local command and reads tools/list.
+ * mcp-remote commands are spawned like any other local server — they
+ * handle their own auth via the env passed through. We do NOT auto-inject
+ * cached tokens from ~/.mcp-auth here, since doing so without scoping to
+ * the target server risks leaking access tokens to attacker-controlled URLs
+ * in a tampered config.
  */
-async function measureViaCachedToken(
-  name: string,
-  url: string,
-  cachedTokens: TokenCache[],
-  envHeaders: Record<string, string> | undefined,
-  verbose: boolean,
-  timeoutMs: number
-): Promise<MeasureStats | null> {
-  const baseHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream",
-    ...(envHeaders || {}),
-  }
-  for (const ct of cachedTokens) {
-    const result = await measureViaHttp(name, url, () => ({
-      ...baseHeaders,
-      "Authorization": `${ct.type} ${ct.token}`,
-    }), verbose, timeoutMs)
-    if (result !== null) return result
-  }
-  return null
-}
-
 async function measureLocal(
   name: string,
   entry: McpConfigEntry,
@@ -562,9 +511,6 @@ async function measureLocal(
   const cmdParts = entry.command || []
   let [cmd, ...args] = cmdParts
   if (!cmd) return null
-  const SHORTHAND: Record<string, string[]> = { "netlify-mcp": ["npx", "-y", "@netlify/mcp"] }
-  const resolved = SHORTHAND[cmd]
-  if (resolved) { cmd = resolved[0]; args = [...resolved.slice(1), ...args] }
 
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   if (entry.env) Object.assign(env, entry.env)
@@ -620,7 +566,7 @@ async function measureLocal(
     send({
       jsonrpc: "2.0", id: "1", method: "initialize",
       params: {
-        protocolVersion: "2024-11-05", capabilities: {},
+        protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {},
         clientInfo: { name: "scanner", version: "1.0.0" },
       },
     })
@@ -655,7 +601,6 @@ async function cmdMeasure(
   const config = await loadMergedConfigs(cwd)
   const mcps = config.mcp
   const names = Object.keys(mcps)
-  const cachedTokens = await loadCachedTokens(verbose)
   const savings: Record<string, MeasureStats> = {}
 
   if (!asJson) process.stderr.write("  Measuring")
@@ -664,15 +609,9 @@ async function cmdMeasure(
     if (entry.enabled === false) continue
 
     let result: MeasureStats | null = null
-    const isMcpRemote = entry.type === "local" &&
-      entry.command?.[0] === "mcp-remote" &&
-      entry.command?.[1]
-
     try {
       if (!asJson) process.stderr.write(".")
-      if (isMcpRemote) {
-        result = await measureViaCachedToken(name, entry.command![1], cachedTokens, entry.headers, verbose, perServerTimeout)
-      } else if (entry.type === "local") {
+      if (entry.type === "local") {
         result = await measureLocal(name, entry, verbose, perServerTimeout)
       } else {
         result = await measureRemote(name, entry, verbose, perServerTimeout)
