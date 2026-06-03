@@ -5,9 +5,9 @@
  * project-level opencode.jsonc tools block. This disables MCP tools in the
  * main session (saves tokens) while subagents re-enable them via tool scoping.
  *
- * Why string manipulation instead of JSON parse → modify → stringify?
+ * Why string manipulation instead of JSON parse â†’ modify â†’ stringify?
  * - opencode.jsonc uses JSONC (comments, trailing commas)
- * - JSON.parse strips comments — we'd lose user comments on re-write
+ * - JSON.parse strips comments â€” we'd lose user comments on re-write
  * - String manipulation preserves comments and formatting
  *
  * Trade-off: more fragile than proper JSON manipulation. We compensate with:
@@ -32,7 +32,7 @@ import { MAX_CONFIG_SIZE, stripBOM, validatePath, escapeRegex, safeWriteFile, st
  * Idempotent: checks if entries already exist before writing.
  * Only writes when missing entries are found.
  *
- * The disable pattern is "servername_*": false — OpenCode uses this glob
+ * The disable pattern is "servername_*": false â€” OpenCode uses this glob
  * pattern to match all tools from a given MCP server.
  *
  * @returns true if file was modified, false if already disabled or error
@@ -58,7 +58,7 @@ export async function ensureToolsDisabled(
       return false
     }
   } else {
-    // No project config exists — start with empty object
+    // No project config exists â€” start with empty object
     raw = "{}"
   }
 
@@ -66,7 +66,7 @@ export async function ensureToolsDisabled(
   // Strip BOM (Windows editors may prepend it)
   raw = stripBOM(raw)
 
-  // Strip comments before checking — comments like // "github_*": false
+  // Strip comments before checking â€” comments like // "github_*": false
   // should not count as actual disable entries
   const stripped = stripJsonc(raw)
   const missing = mcpServers.filter((name) => {
@@ -76,18 +76,18 @@ export async function ensureToolsDisabled(
     return !regex.test(stripped)
   })
 
-  // All servers already disabled — nothing to do
+  // All servers already disabled â€” nothing to do
   if (missing.length === 0) return false
 
   // Build the new entries as JSON text (one per line for readability)
   const newEntries = missing.map((name) => `"${name}_*": false`).join(",\n    ")
 
-  // Use stripped version to find "tools" — avoids matching comments
+  // Use stripped version to find "tools" â€” avoids matching comments
   const toolsMatch = stripped.match(/"tools"\s*:\s*\{/)
   let modified: string
 
   if (toolsMatch) {
-    // "tools" block exists — insert entries after opening brace
+    // "tools" block exists â€” insert entries after opening brace
     // Map position from stripped string back to original (comments shift positions)
     if (toolsMatch.index === undefined) return false
     const insertPos = mapStrippedPosition(raw, stripped, toolsMatch.index + toolsMatch[0].length)
@@ -107,7 +107,7 @@ export async function ensureToolsDisabled(
       modified = prefix + "\n    " + newEntries + ",\n    " + suffix.trimStart()
     }
   } else {
-    // No "tools" block — create one before the closing root brace
+    // No "tools" block â€” create one before the closing root brace
     const toolsBlock = `"tools": {\n    ${newEntries}\n  }`
 
     // Use stripped version to find closing brace (comments can contain } chars)
@@ -115,7 +115,7 @@ export async function ensureToolsDisabled(
     const closingBrace = findClosingRootBrace(strippedForBrace)
 
     if (closingBrace >= 0) {
-      // Found closing brace — insert tools block before it
+      // Found closing brace â€” insert tools block before it
       // Use lastIndexOf on original since stripped positions don't map cleanly here
       const lastBrace = raw.lastIndexOf("}")
       const beforeRaw = raw.slice(0, lastBrace).trimEnd()
@@ -124,7 +124,7 @@ export async function ensureToolsDisabled(
       const prefix = beforeRaw === "{" ? "" : ","
       modified = beforeRaw + prefix + "\n  " + toolsBlock + "\n" + afterRaw
     } else {
-      // No closing brace found (malformed JSON) — append tools block
+      // No closing brace found (malformed JSON) â€” append tools block
       modified = raw.trimEnd() + ",\n  " + toolsBlock + "\n}"
     }
   }
@@ -171,7 +171,7 @@ export async function ensureSubagentsCreated(
     }
   }
 
-  // Read lock file — MCPs in autoCreated were previously created
+  // Read lock file â€” MCPs in autoCreated were previously created
   // If user deleted them, they stay in the lock file and we respect that
   const lock = await readLock(directory)
   const previouslyCreated = new Set(lock?.autoCreated ?? [])
@@ -359,14 +359,222 @@ export async function removeToolsDisable(
 }
 
 /**
- * Finds the index of the closing brace matching the opening brace at `openIdx`.
+ * Removes specific subagent entries from the "agent" block.
+ * Used by uninstall to clean up auto-created subagents tracked in the lock.
+ * User-written subagents (not in `names`) are never touched.
+ *
+ * Scoped to the agent block: same safety pattern as removeToolsDisable.
+ * Only deletes the whole agent block when it becomes truly empty.
+ *
+ * @returns number of subagent entries removed
+ */
+export async function removeAutoSubagents(
+  directory: string,
+  names: string[]
+): Promise<number> {
+  if (names.length === 0) return 0
+
+  const resolved = await findProjectConfigPath(directory)
+  if (!resolved || !resolved.exists) return 0
+
+  let raw: string
+  try {
+    raw = await readFile(resolved.path, "utf-8")
+    if (raw.length > MAX_CONFIG_SIZE) return 0
+  } catch {
+    return 0
+  }
+
+  raw = stripBOM(raw)
+  const stripped = stripJsonc(raw)
+  const agentMatch = stripped.match(/"agent"\s*:\s*\{/)
+  if (!agentMatch || agentMatch.index === undefined) return 0
+
+  const keyEndInStripped = agentMatch.index + agentMatch[0].length
+  const blockEndInStripped = findMatchingBrace(stripped, keyEndInStripped - 1)
+  if (blockEndInStripped < 0) return 0
+
+  const origKeyStart = mapStrippedPosition(raw, stripped, agentMatch.index)
+  const origKeyEnd = mapStrippedPosition(raw, stripped, keyEndInStripped)
+  const origBlockEnd = mapStrippedPosition(raw, stripped, blockEndInStripped) + 1
+
+  const blockRaw = raw.slice(origKeyEnd, origBlockEnd)
+  let modifiedBlock = blockRaw
+  let removed = 0
+
+  for (const name of names) {
+    const safeName = escapeRegex(name)
+    // Match a subagent entry: "name": { ... } at any depth within the agent block.
+    // We bound the match by tracking brace depth from the opening { of the entry.
+    // Simpler: match the opening line, then walk forward to its matching close.
+    const entryStartRe = new RegExp(
+      `[,\\s\\r\\n]*\\"${safeName}\\"\\s*:\\s*\\{`,
+      "g"
+    )
+    let m: RegExpExecArray | null
+    let lastIndex = 0
+    const newBlock: string[] = []
+    let cursor = 0
+    while ((m = entryStartRe.exec(modifiedBlock)) !== null) {
+      // Skip if this match is inside a string or block comment â€” since we already
+      // run on the stripped version, that's a non-issue here.
+      const openBraceIdx = m.index + m[0].lastIndexOf("{")
+      const closeBraceIdx = findMatchingBrace(modifiedBlock, openBraceIdx)
+      if (closeBraceIdx < 0) break
+      newBlock.push(modifiedBlock.slice(cursor, m.index))
+      cursor = closeBraceIdx + 1
+      removed++
+      lastIndex = entryStartRe.lastIndex
+    }
+    if (newBlock.length > 0) {
+      newBlock.push(modifiedBlock.slice(cursor))
+      modifiedBlock = newBlock.join("")
+    } else {
+      // No matches â€” keep block as-is
+    }
+    // Suppress unused-var warning when no matches
+    void lastIndex
+  }
+
+  if (removed === 0) return 0
+
+  // Strip any dangling commas left in the block.
+  // Trailing: before the block's closing } (existing pattern).
+  // Leading: when the first entry is removed, its leading whitespace is
+  // consumed by the regex but the separator comma that separated it from
+  // the previous (non-existent) entry remains, leaving a dangling "," at
+  // the start of the block. Splice that out so the result is valid JSON.
+  modifiedBlock = modifiedBlock.replace(/,(\s*})/, "$1")
+  modifiedBlock = modifiedBlock.replace(/^\s*,/, "")
+
+  // Detect empty block (only whitespace + braces)
+  const blockContent = stripJsonc(modifiedBlock).replace(/^[\s{}]+|[\s{}]+$/g, "")
+  const isEmpty = blockContent === ""
+
+  let modified: string
+  if (isEmpty) {
+    const before = raw.slice(0, origKeyStart).replace(/,(\s*})$/, "$1")
+    const after = raw.slice(origBlockEnd)
+    modified = before + after
+  } else {
+    modified = raw.slice(0, origKeyEnd) + modifiedBlock + raw.slice(origBlockEnd)
+  }
+
+  try {
+    JSON.parse(stripJsonc(modified))
+  } catch (e) {
+    return 0
+  }
+
+  await safeWriteFile(resolved.path, modified)
+  return removed
+}
+
+/**
+ * Removes this plugin's entry from the "plugin" array in the project config.
+ * Matches by package name, file: path pointing at this plugin, or local path
+ * whose last segment contains the package name.
+ *
+ * Never touches the "plugin" key itself â€” only filters the array.
+ *
+ * @returns true if an entry was removed
+ */
+export async function removePluginEntry(directory: string): Promise<boolean> {
+  const resolved = await findProjectConfigPath(directory)
+  if (!resolved || !resolved.exists) return false
+
+  let raw: string
+  try {
+    raw = await readFile(resolved.path, "utf-8")
+    if (raw.length > MAX_CONFIG_SIZE) return false
+  } catch {
+    return false
+  }
+
+  raw = stripBOM(raw)
+  const stripped = stripJsonc(raw)
+  const pluginMatch = stripped.match(/"plugin"\s*:\s*\[/)
+  if (!pluginMatch || pluginMatch.index === undefined) return false
+
+  const arrStartInStripped = pluginMatch.index + pluginMatch[0].length - 1
+  const arrEndInStripped = findMatchingBrace(stripped, arrStartInStripped)
+  if (arrEndInStripped < 0) return false
+
+  const origKeyStart = mapStrippedPosition(raw, stripped, pluginMatch.index)
+  const origKeyEnd = mapStrippedPosition(raw, stripped, pluginMatch.index + pluginMatch[0].length)
+  const origArrEnd = mapStrippedPosition(raw, stripped, arrEndInStripped) + 1
+
+  const arrRaw = raw.slice(origKeyEnd, origArrEnd)
+
+  // Match each array entry: optional whitespace+comma, then a quoted string value
+  // up to the matching closing quote (handling escapes).
+  const entryRe = /(\s*,\s*)?\s*"((?:[^"\\]|\\.)*)"\s*/g
+  const entries: { value: string; raw: string; trailing: string }[] = []
+  let m: RegExpExecArray | null
+  while ((m = entryRe.exec(arrRaw)) !== null) {
+    const value = m[2]
+    const trailingStart = m.index + m[0].length
+    entries.push({
+      value,
+      raw: arrRaw.slice(m.index, trailingStart),
+      trailing: arrRaw.slice(trailingStart, trailingStart + 1),
+    })
+  }
+
+  // Filter: drop entries matching this plugin
+  const kept = entries.filter((e) => !matchesPluginEntry(e.value))
+  if (kept.length === entries.length) return false
+
+  // Rebuild array content. If empty, keep the brackets but drop the entries
+  // (so the array key still exists if user wants to re-add later).
+  const isEmpty = kept.length === 0
+  const newArr = isEmpty ? "" : kept.map((e) => e.raw).join("")
+
+  // Clean up dangling commas (leading or trailing) left after filtering.
+  // Leading: when the first entry is removed, the comma that separated it
+  // from the now-missing previous entry dangles at the start of the array.
+  // Trailing: when the last entry is removed, the comma before the closing
+  // bracket dangles at the end.
+  let newBlock = newArr
+  newBlock = newBlock.replace(/^\s*,/, "")
+  if (newBlock.endsWith(",")) {
+    newBlock = newBlock.slice(0, -1).trimEnd()
+  }
+
+  const modified =
+    raw.slice(0, origKeyEnd) + newBlock + raw.slice(origArrEnd - 1)
+
+  try {
+    JSON.parse(stripJsonc(modified))
+  } catch (e) {
+    return false
+  }
+
+  await safeWriteFile(resolved.path, modified)
+  return true
+}
+
+function matchesPluginEntry(value: string): boolean {
+  if (value === "opencode-mcp-triage") return true
+  if (value.startsWith("file:")) {
+    return /[\\/]opencode-mcp-triage([\\/]|$)/.test(value)
+  }
+  return false
+}
+
+/**
+ * Finds the index of the closing brace or bracket matching the opener at `openIdx`.
  * Scans forward with depth tracking and string awareness.
- * Returns -1 if not found.
+ * Supports `{` / `}` and `[` / `]`. Returns -1 if not found or opener is neither.
  *
  * @internal exported for testing
  */
 export function findMatchingBrace(s: string, openIdx: number): number {
-  if (s[openIdx] !== "{") return -1
+  const opener = s[openIdx]
+  let closer: string
+  if (opener === "{") closer = "}"
+  else if (opener === "[") closer = "]"
+  else return -1
   let depth = 0
   let inString = false
   let escape = false
@@ -386,8 +594,8 @@ export function findMatchingBrace(s: string, openIdx: number): number {
       inString = true
       continue
     }
-    if (ch === "{") depth++
-    if (ch === "}") {
+    if (ch === opener) depth++
+    if (ch === closer) {
       depth--
       if (depth === 0) return i
     }
@@ -406,7 +614,7 @@ export function findMatchingBrace(s: string, openIdx: number): number {
  *
  * If no project config exists, checks for a global config.
  * If global exists, returns a new project path (.opencode/opencode.jsonc)
- * with exists: false — caller should create it.
+ * with exists: false â€” caller should create it.
  *
  * Returns null if neither project nor global config exists.
  */
@@ -426,11 +634,11 @@ async function findProjectConfigPath(
       await readFile(path, "utf-8")
       return { path, exists: true }
     } catch {
-      // File not found — try next path
+      // File not found â€” try next path
     }
   }
 
-  // No project config — check if global config exists
+  // No project config â€” check if global config exists
   // If so, we'll create a project-level override with just the tools section
   const globalPaths = [
     join(homedir(), ".config", "opencode", "opencode.jsonc"),
@@ -441,11 +649,11 @@ async function findProjectConfigPath(
     if (!validatePath(path)) continue
     try {
       await readFile(path, "utf-8")
-      // Global has config — create project-level tools-only override
+      // Global has config â€” create project-level tools-only override
       const newPath = join(directory, ".opencode", "opencode.jsonc")
       return { path: newPath, exists: false }
     } catch {
-      // Global not found either — try next path
+      // Global not found either â€” try next path
     }
   }
 
@@ -459,7 +667,7 @@ async function findProjectConfigPath(
  * Used when we find a match position in the stripped version (for regex
  * matching) but need to insert/modify text in the original.
  *
- * Works by walking both strings in parallel — when characters match,
+ * Works by walking both strings in parallel â€” when characters match,
  * advance the stripped index. Always advance the original index.
  * When stripped index reaches the target position, original index is
  * the corresponding position in the original string.

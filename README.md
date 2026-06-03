@@ -159,6 +159,7 @@ On first run, the plugin writes tool disable entries and auto-creates one subage
 | `status` | Show MCP server status, hidden/exposed tools, subagent routing |
 | `list` | List all configured MCP servers and subagents |
 | `measure` | Connect to each MCP server and measure token savings per turn |
+| `uninstall` | Remove plugin: disable entries, auto-created subagents, lock file (asks for confirm) |
 | `help` | Show available commands |
 
 ### Flags
@@ -168,6 +169,7 @@ On first run, the plugin writes tool disable entries and auto-creates one subage
 | `--json` | All commands | Machine-readable JSON output |
 | `--verbose` | `measure` | Show error diagnostics (HTTP codes, spawn errors, timeouts) |
 | `--timeout=N` | `measure` | Per-server timeout in seconds (default: 60) |
+| `--yes`, `-y` | `uninstall` | Skip the confirmation prompt |
 
 All CLI commands can be run directly in your terminal via `npx opencode-mcp-triage <command>` (e.g., `npx opencode-mcp-triage measure --verbose`). No OpenCode session needed.
 
@@ -209,11 +211,24 @@ MCP server and subagent config reads are cached with a 5-second TTL. CLI toggles
 
 ## Uninstall
 
-1. Remove `"opencode-mcp-triage"` from the `"plugin"` array in your config
-2. Remove the auto-generated `"servername_*": false` entries from `"tools"`
-3. (Optional) Remove any auto-created subagents from `"agent"`
-4. (Optional) Delete the lock file at `.opencode/mcp-triage.json`
-5. Delete the slash command:
+Run the CLI — it handles every cleanup step in one pass:
+
+```bash
+npx opencode-mcp-triage uninstall
+```
+
+It shows a preview (counts of plugin entries, MCP disable entries, auto-created subagents, lock file) and asks for confirmation before changing anything. Pass `--yes` to skip the prompt.
+
+It will:
+
+1. Remove `"opencode-mcp-triage"` from the `"plugin"` array
+2. Remove all `"servername_*": false` entries from `"tools"` (non-MCP entries preserved)
+3. Remove subagents that triage auto-created (tracked in the lock file). **User-written subagents are never touched.**
+4. Delete the lock file at `.opencode/mcp-triage.json`
+
+Your MCP server config (`"mcp"` block) is **never modified** — only the triage-specific entries.
+
+To complete the uninstall, restart OpenCode and optionally delete the slash command file:
 
 ```bash
 # macOS / Linux
@@ -225,7 +240,7 @@ rm ~/.config/opencode/commands/mcp-triage.md
 del %USERPROFILE%\.config\opencode\commands\mcp-triage.md
 ```
 
-Restart OpenCode. Clean.
+To re-enable triage later without reinstalling: re-add the plugin to `"plugin"` and run `triage enable`.
 
 ## Compatibility
 

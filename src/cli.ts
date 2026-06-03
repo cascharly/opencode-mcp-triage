@@ -17,8 +17,11 @@ import { readRawConfig, findConfigPath, readMcpConfig, readSubagentConfig } from
 import type { McpConfigEntry } from "./types.js"
 import { calcAssignedMcps } from "./utils.js"
 import { levenshtein, suggestCommand } from "./utils.js"
-import { ensureToolsDisabled, removeToolsDisable } from "./writer.js"
-import { isTriageEnabled, toggleTriage } from "./lock.js"
+import { ensureToolsDisabled, removeToolsDisable, removeAutoSubagents, removePluginEntry } from "./writer.js"
+import { isTriageEnabled, toggleTriage, readLock } from "./lock.js"
+import { unlink } from "node:fs/promises"
+import { join } from "node:path"
+import { createInterface } from "node:readline"
 import { homedir } from "node:os"
 import { spawn } from "node:child_process"
 
@@ -33,6 +36,7 @@ const COMMANDS: Record<string, string> = {
   measure: "Measure token savings by connecting to each MCP server",
   enable: "Enable triage — disable MCP tools in main session",
   disable: "Disable triage — restore MCP tools to main session",
+  uninstall: "Remove plugin: delete disable entries, auto-created subagents, lock file",
   help: "Show available commands",
 }
 
@@ -333,6 +337,208 @@ async function cmdDisable(cwd: string): Promise<void> {
   }
 }
 
+/**
+ * Prompts the user for a y/N answer. Returns true for "y" or "Y", false otherwise.
+ * Skips the prompt entirely when running non-interactively (no TTY) and the caller
+ * didn't pass --yes; in that case we abort to be safe.
+ */
+async function confirmOrAbort(prompt: string, yes: boolean): Promise<boolean> {
+  if (yes) return true
+  if (!process.stdin.isTTY) {
+    console.log(`\n  ${YELLOW}!${RESET} Non-interactive shell detected. Re-run with ${BOLD}--yes${RESET} to confirm.`)
+    return false
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(prompt, (a) => resolve(a))
+    })
+    return answer.trim().toLowerCase().startsWith("y")
+  } finally {
+    rl.close()
+  }
+}
+
+/**
+ * Full uninstall: reverses the install.
+ * - Removes the plugin from the `plugin` array
+ * - Removes all "servername_*": false entries (preserves other tool entries)
+ * - Removes subagents that triage auto-created (tracked in lock file).
+ *   User-written subagents are never touched.
+ * - Deletes .opencode/mcp-triage.json (the lock file)
+ *
+ * Always prints a preview and asks for confirmation unless --yes is passed.
+ * The MCP `mcp` block itself is preserved — that's user config, not ours.
+ */
+async function cmdUninstall(cwd: string, yes: boolean): Promise<void> {
+  console.log()
+  console.log(BOLD + "Triage uninstall" + RESET)
+  console.log(DIM + "  Scans the project config and lock file, then asks before changing anything." + RESET)
+  console.log()
+
+  // --- Gather what would change -------------------------------------------
+  const mcpServers = await readMcpConfig(cwd)
+  const mcpNames = mcpServers.map((s) => s.name)
+  const lock = await readLock(cwd)
+  const autoCreated = lock?.autoCreated ?? []
+  const configPath = await findConfigPath(cwd)
+  const lockPath = join(cwd, ".opencode", "mcp-triage.json")
+
+  // --- Preview ------------------------------------------------------------
+  type Step = { label: string; count: number; detail: string }
+  const steps: Step[] = []
+
+  // Plugin entry
+  let pluginFound = false
+  if (configPath) {
+    const cfg = await readRawConfig(cwd)
+    const plugins = cfg?.plugin as unknown[] | undefined
+    if (Array.isArray(plugins)) {
+      pluginFound = plugins.some(
+        (p) => typeof p === "string" && matchesPluginValue(p, cwd)
+      )
+    }
+  }
+  steps.push({
+    label: "Plugin entry",
+    count: pluginFound ? 1 : 0,
+    detail: pluginFound
+      ? `remove "opencode-mcp-triage" from "plugin" array in ${shortPath(configPath)}`
+      : `not present in "plugin" array (skipped)`,
+  })
+
+  // MCP disable entries
+  steps.push({
+    label: "MCP disable entries",
+    count: mcpNames.length,
+    detail: mcpNames.length > 0
+      ? `remove ${mcpNames.length} "name_*": false entries from "tools" (non-MCP entries preserved)`
+      : "no MCP servers found (nothing to remove)",
+  })
+
+  // Auto-created subagents
+  steps.push({
+    label: "Auto-created subagents",
+    count: autoCreated.length,
+    detail: autoCreated.length > 0
+      ? `remove ${autoCreated.length} subagent(s) from "agent": ${autoCreated.join(", ")}`
+      : "none tracked in lock (skipped)",
+  })
+
+  // Lock file
+  const lockExists = lock !== null
+  steps.push({
+    label: "Lock file",
+    count: lockExists ? 1 : 0,
+    detail: lockExists
+      ? `delete ${shortPath(lockPath)}`
+      : "not present (skipped)",
+  })
+
+  console.log(BOLD + "  Changes to make:" + RESET)
+  for (const s of steps) {
+    const marker = s.count > 0 ? `${GREEN}●${RESET}` : `${DIM}○${RESET}`
+    console.log(`    ${marker} ${BOLD}${s.label}${RESET}  ${DIM}(${s.count})${RESET}`)
+    console.log(`        ${s.detail}`)
+  }
+
+  const totalChanges = steps.reduce((acc, s) => acc + s.count, 0)
+  console.log()
+  if (totalChanges === 0) {
+    console.log(`  ${DIM}Nothing to remove. Plugin not installed (or already cleaned up).${RESET}`)
+    console.log()
+    return
+  }
+
+  // --- Confirm ------------------------------------------------------------
+  const ok = await confirmOrAbort(`  Proceed with ${totalChanges} change(s)? [y/N] `, yes)
+  if (!ok) {
+    console.log(`\n  ${YELLOW}○${RESET} Cancelled. No changes written.\n`)
+    return
+  }
+  console.log()
+
+  // --- Execute ------------------------------------------------------------
+  let pluginsRemoved = 0
+  let toolsRemoved = 0
+  let subagentsRemoved = 0
+  let lockRemoved = false
+
+  if (pluginFound) {
+    const ok = await removePluginEntry(cwd)
+    pluginsRemoved = ok ? 1 : 0
+    console.log(`  ${ok ? GREEN + "✓" : YELLOW + "!"}${RESET} Plugin entry: ${ok ? "removed" : "could not remove (skipped)"}`)
+  } else {
+    console.log(`  ${DIM}○${RESET} Plugin entry: not present (skipped)`)
+  }
+
+  if (mcpNames.length > 0) {
+    const ok = await removeToolsDisable(cwd, mcpNames)
+    toolsRemoved = ok ? mcpNames.length : 0
+    console.log(`  ${ok ? GREEN + "✓" : YELLOW + "!"}${RESET} MCP disable entries: ${ok ? `${mcpNames.length} removed` : "none found (skipped)"}`)
+  } else {
+    console.log(`  ${DIM}○${RESET} MCP disable entries: nothing to remove`)
+  }
+
+  if (autoCreated.length > 0) {
+    const removed = await removeAutoSubagents(cwd, autoCreated)
+    subagentsRemoved = removed
+    console.log(`  ${removed > 0 ? GREEN + "✓" : YELLOW + "!"}${RESET} Auto-created subagents: ${removed} of ${autoCreated.length} removed`)
+    if (removed < autoCreated.length) {
+      const missing = autoCreated.filter((n) => !inAgent(cwd, n))
+      // missing may be empty if user manually removed them; that's fine
+      void missing
+    }
+  } else {
+    console.log(`  ${DIM}○${RESET} Auto-created subagents: none tracked`)
+  }
+
+  if (lockExists) {
+    try {
+      await unlink(lockPath)
+      lockRemoved = true
+      console.log(`  ${GREEN}✓${RESET} Lock file: deleted`)
+    } catch {
+      console.log(`  ${YELLOW}!${RESET} Lock file: could not delete (you can remove it manually)`)
+    }
+  } else {
+    console.log(`  ${DIM}○${RESET} Lock file: not present`)
+  }
+
+  // --- Summary ------------------------------------------------------------
+  console.log()
+  console.log(BOLD + "  Summary" + RESET)
+  console.log(`    Plugin entries removed:     ${pluginsRemoved}`)
+  console.log(`    MCP disable entries removed: ${mcpNames.length - (mcpNames.length - toolsRemoved)}`)
+  console.log(`    Subagents removed:          ${subagentsRemoved}`)
+  console.log(`    Lock file:                  ${lockRemoved ? "deleted" : "kept"}`)
+  console.log()
+  console.log(`  ${GREEN}●${RESET} ${BOLD}Uninstall complete.${RESET}`)
+  console.log(`  ${DIM}Restart OpenCode for plugin changes to take effect.${RESET}`)
+  console.log(`  ${DIM}Your MCP servers in the "mcp" block are untouched.${RESET}`)
+  console.log(`  ${DIM}To reinstall: ${CYAN}npm install -g opencode-mcp-triage${RESET}${DIM} or run ${CYAN}triage enable${RESET}${DIM} after adding the plugin back.${RESET}`)
+  console.log()
+}
+
+function matchesPluginValue(value: string, searchPath: string): boolean {
+  if (value === "opencode-mcp-triage") return true
+  if (value === "file:" + searchPath) return true
+  if (value.startsWith("file:")) {
+    return /[\\/]opencode-mcp-triage([\\/]|$)/.test(value)
+  }
+  return false
+}
+
+function shortPath(p: string | null): string {
+  if (!p) return "(unknown)"
+  return p
+}
+
+async function inAgent(cwd: string, name: string): Promise<boolean> {
+  const subs = await readSubagentConfig(cwd)
+  return subs.some((s) => s.name === name)
+}
+
 function cmdHelp(): void {
   console.log()
   console.log(BOLD + "opencode-mcp-triage v0.8.0" + RESET + " — Subagent Router for MCP Tools")
@@ -347,6 +553,7 @@ function cmdHelp(): void {
   console.log("  measure       Connect to MCP servers and measure token savings per turn")
   console.log("  enable        Enable triage — disable MCP tools in main session")
   console.log("  disable       Disable triage — restore MCP tools to main session")
+  console.log("  uninstall     Remove plugin: disable entries, auto-created subagents, lock file")
   console.log("  help          Show this help")
   console.log()
   console.log(BOLD + "FLAGS" + RESET)
@@ -354,6 +561,7 @@ function cmdHelp(): void {
   console.log("  --json          Output as JSON (all commands)")
   console.log("  --verbose       Show error diagnostics during measure")
   console.log("  --timeout=N     Per-server timeout in seconds (default: 60)")
+  console.log("  --yes, -y       Skip the uninstall confirmation prompt")
   console.log()
   console.log(BOLD + "HOW IT WORKS" + RESET)
   console.log()
@@ -659,6 +867,7 @@ async function main(): Promise<void> {
   const flags = args.slice(1)
   const asJson = flags.includes("--json")
   const verbose = flags.includes("--verbose")
+  const yes = flags.includes("--yes") || flags.includes("-y")
 
   let perServerTimeout = 60000
   const timeoutFlag = flags.find((f) => /^--timeout(=.+)?$/.test(f))
@@ -674,7 +883,7 @@ async function main(): Promise<void> {
   const globalPath = await findConfigPath(homedir())
   const projectPath = await findConfigPath(cwd)
 
-  if (!globalPath && !projectPath) {
+  if (!globalPath && !projectPath && rawCmd !== "help") {
     console.log("No opencode.jsonc found in project or global config.")
     process.exit(1)
   }
@@ -708,6 +917,9 @@ async function main(): Promise<void> {
       break
     case "disable":
       await cmdDisable(cwd)
+      break
+    case "uninstall":
+      await cmdUninstall(cwd, yes)
       break
     case "help":
     default:

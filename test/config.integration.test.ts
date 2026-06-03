@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { ensureToolsDisabled, ensureSubagentsCreated, removeToolsDisable } from "../src/writer.js"
+import { ensureToolsDisabled, ensureSubagentsCreated, removeToolsDisable, removeAutoSubagents, removePluginEntry } from "../src/writer.js"
 import { isTriageEnabled, toggleTriage, readLock } from "../src/lock.js"
 
 function makeConfig(dir: string, content: string): void {
@@ -217,5 +217,126 @@ describe("triage toggle (lock)", () => {
     await toggleTriage(tmpDir, false)
     const lock = await readLock(tmpDir)
     expect(lock?.enabled).toBe(false)
+  })
+})
+
+describe("removeAutoSubagents", () => {
+  it("removes specified subagent entries", async () => {
+    makeConfig(tmpDir, `{
+  "agent": {
+    "github": { "mode": "subagent", "tools": { "github_*": true } },
+    "supabase": { "mode": "subagent", "tools": { "supabase_*": true } },
+    "user-agent": { "mode": "subagent", "tools": { "read": true } }
+  }
+}`)
+    const removed = await removeAutoSubagents(tmpDir, ["github", "supabase"])
+    expect(removed).toBe(2)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"github"')
+    expect(raw).not.toContain('"supabase"')
+    expect(raw).toContain('"user-agent"')
+  })
+
+  it("preserves user-written subagents", async () => {
+    makeConfig(tmpDir, `{
+  "agent": {
+    "auto-github": { "mode": "subagent", "tools": { "github_*": true } },
+    "my-custom-agent": { "mode": "subagent", "tools": { "read": true } }
+  }
+}`)
+    const removed = await removeAutoSubagents(tmpDir, ["auto-github"])
+    expect(removed).toBe(1)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).toContain('"my-custom-agent"')
+    expect(raw).not.toContain('"auto-github"')
+  })
+
+  it("returns 0 when no agent block exists", async () => {
+    makeConfig(tmpDir, "{}")
+    const removed = await removeAutoSubagents(tmpDir, ["github"])
+    expect(removed).toBe(0)
+  })
+
+  it("returns 0 when names array is empty", async () => {
+    makeConfig(tmpDir, `{
+  "agent": {
+    "github": { "mode": "subagent", "tools": { "github_*": true } }
+  }
+}`)
+    const removed = await removeAutoSubagents(tmpDir, [])
+    expect(removed).toBe(0)
+  })
+
+  it("deletes the agent block when it becomes empty", async () => {
+    makeConfig(tmpDir, `{
+  "agent": {
+    "github": { "mode": "subagent", "tools": { "github_*": true } }
+  }
+}`)
+    const removed = await removeAutoSubagents(tmpDir, ["github"])
+    expect(removed).toBe(1)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain("agent")
+  })
+
+  it("handles nested braces inside subagent entries", async () => {
+    makeConfig(tmpDir, `{
+  "agent": {
+    "complex": {
+      "mode": "subagent",
+      "description": "has { brace } and stuff",
+      "tools": { "x_*": true }
+    },
+    "other": { "mode": "subagent", "tools": { "y_*": true } }
+  }
+}`)
+    const removed = await removeAutoSubagents(tmpDir, ["complex"])
+    expect(removed).toBe(1)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain('"complex"')
+    expect(raw).toContain('"other"')
+  })
+})
+
+describe("removePluginEntry", () => {
+  it("removes plugin by package name", async () => {
+    makeConfig(tmpDir, `{
+  "plugin": ["opencode-mcp-triage", "other-plugin"]
+}`)
+    const removed = await removePluginEntry(tmpDir)
+    expect(removed).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain("opencode-mcp-triage")
+    expect(raw).toContain("other-plugin")
+  })
+
+  it("removes plugin by file: path", async () => {
+    makeConfig(tmpDir, `{
+  "plugin": ["file:/some/path/opencode-mcp-triage", "other"]
+}`)
+    const removed = await removePluginEntry(tmpDir)
+    expect(removed).toBe(true)
+    const raw = readFileSync(join(tmpDir, ".opencode", "opencode.jsonc"), "utf-8")
+    expect(raw).not.toContain("opencode-mcp-triage")
+    expect(raw).toContain("other")
+  })
+
+  it("returns false when plugin not in array", async () => {
+    makeConfig(tmpDir, `{
+  "plugin": ["other-plugin"]
+}`)
+    const removed = await removePluginEntry(tmpDir)
+    expect(removed).toBe(false)
+  })
+
+  it("returns false when no plugin array exists", async () => {
+    makeConfig(tmpDir, "{}")
+    const removed = await removePluginEntry(tmpDir)
+    expect(removed).toBe(false)
+  })
+
+  it("returns false when no config file exists", async () => {
+    const removed = await removePluginEntry(tmpDir)
+    expect(removed).toBe(false)
   })
 })

@@ -166,4 +166,12 @@ describe("findMatchingBrace", () => {
   it("returns -1 for non-brace index", () => {
     expect(findMatchingBrace('"a": 1', 0)).toBe(-1)
   })
+
+  it("matches square brackets for arrays", () => {
+    expect(findMatchingBrace('["a", "b", "c"]', 0)).toBe(14)
+  })
+
+  it("ignores brackets inside strings", () => {
+    expect(findMatchingBrace('["a]", "b"]', 0)).toBe(10)
+  })
 })
