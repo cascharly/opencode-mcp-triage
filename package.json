@@ -1,6 +1,6 @@
 {
   "name": "opencode-mcp-triage",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "On-demand MCP tool activation for OpenCode — saves ~80% tokens by shrinking MCP tool descriptions and routing via keyword matching",
   "license": "MIT",
   "author": "Carlos Spagnoletti",
